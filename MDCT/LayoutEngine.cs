@@ -417,6 +417,9 @@ public sealed class LayoutEngine
     /// <summary>
     /// forceRawTableStarts: table start-lines that should be rendered as raw source (not as grid).
     /// forceRawCodeFenceStarts: fence start-lines that should be rendered raw (show full source including markers).
+    /// forceRawLines: source-lines that must be rendered raw (identity projection, no inline parsing, no marker-hiding).
+    /// forceRawInlineLines: source-lines where ONLY inline markdown must stay visible as source
+    ///                    (no InlineMarkdown.Parse, aber block-prefix Projektion darf bleiben).
     /// </summary>
     public void Rebuild(
         DocumentModel doc,
@@ -425,7 +428,9 @@ public sealed class LayoutEngine
         Font boldFont,
         Font monoFont,
         IReadOnlySet<int>? forceRawTableStarts = null,
-        IReadOnlySet<int>? forceRawCodeFenceStarts = null)
+        IReadOnlySet<int>? forceRawCodeFenceStarts = null,
+        IReadOnlySet<int>? forceRawLines = null,
+        IReadOnlySet<int>? forceRawInlineLines = null)
     {
         _sourceLineCount = doc.LineCount;
 
@@ -529,6 +534,9 @@ public sealed class LayoutEngine
             string source = doc.GetLine(lineIdx);
             var sem = semantics[lineIdx];
 
+            bool forceRawThisLine = forceRawLines?.Contains(lineIdx) == true;
+            bool forceRawInlineThisLine = forceRawInlineLines?.Contains(lineIdx) == true;
+
             // Parser sagt Table, aber hier raw -> als normaler Text rendern
             if (sem.Kind == MarkdownBlockKind.Table)
             {
@@ -556,7 +564,15 @@ public sealed class LayoutEngine
                 VisualProjection proj;
                 IReadOnlyList<InlineRun> runs;
 
-                if (isHorizontalRule)
+                if (forceRawThisLine)
+                {
+                    // Einheitlich raw: komplette Source sichtbar + keine inline transformation
+                    proj = CreateIdentityProjection(source);
+                    runs = proj.DisplayText.Length == 0
+                        ? Array.Empty<InlineRun>()
+                        : new[] { new InlineRun(proj.DisplayText, InlineStyle.None) };
+                }
+                else if (isHorizontalRule)
                 {
                     proj = VisualProjection.HidePrefix(source, source.Length);
                     runs = Array.Empty<InlineRun>();
@@ -601,12 +617,23 @@ public sealed class LayoutEngine
                 }
                 else if (sem.Kind == MarkdownBlockKind.List && listItemByLine.TryGetValue(lineIdx, out var li))
                 {
-                    // Ordered/Unordered/Nested sichtbar + korrektes Mapping
-                    proj = BuildListProjection(source, li);
+                    if (forceRawInlineThisLine)
+                    {
+                        // bei inline-raw in Listen komplette Source zeigen
+                        proj = CreateIdentityProjection(source);
+                        runs = proj.DisplayText.Length == 0
+                            ? Array.Empty<InlineRun>()
+                            : new[] { new InlineRun(proj.DisplayText, InlineStyle.None) };
+                    }
+                    else
+                    {
+                        // Ordered/Unordered/Nested sichtbar + korrektes Mapping
+                        proj = BuildListProjection(source, li);
 
-                    InlineParseResult inline = InlineMarkdown.Parse(proj.DisplayText);
-                    proj = ComposeProjection(proj, inline);
-                    runs = inline.Runs;
+                        InlineParseResult inline = InlineMarkdown.Parse(proj.DisplayText);
+                        proj = ComposeProjection(proj, inline);
+                        runs = inline.Runs;
+                    }
                 }
                 else
                 {
@@ -615,9 +642,20 @@ public sealed class LayoutEngine
 
                     if (SupportsInlineFormatting(sem.Kind))
                     {
-                        InlineParseResult inline = InlineMarkdown.Parse(prefixProj.DisplayText);
-                        proj = ComposeProjection(prefixProj, inline);
-                        runs = inline.Runs;
+                        if (forceRawInlineThisLine)
+                        {
+                            // Prefix-Projektion bleibt, aber inline marker NICHT entfernen
+                            proj = prefixProj;
+                            runs = proj.DisplayText.Length == 0
+                                ? Array.Empty<InlineRun>()
+                                : new[] { new InlineRun(proj.DisplayText, InlineStyle.None) };
+                        }
+                        else
+                        {
+                            InlineParseResult inline = InlineMarkdown.Parse(prefixProj.DisplayText);
+                            proj = ComposeProjection(prefixProj, inline);
+                            runs = inline.Runs;
+                        }
                     }
                     else
                     {
@@ -631,10 +669,10 @@ public sealed class LayoutEngine
                 int lineHeight = MeasureHeight(measureFont) + 4;
                 if (sem.Kind == MarkdownBlockKind.Heading)
                     lineHeight += (sem.HeadingLevel <= 2 ? 4 : 2);
-                else if (isHorizontalRule)
+                else if (isHorizontalRule && !forceRawThisLine)
                     lineHeight = Math.Max(lineHeight, 14);
 
-                int textWidth = isHorizontalRule
+                int textWidth = (isHorizontalRule && !forceRawThisLine)
                     ? Math.Max(1, viewport.Width - left - 12)
                     : Math.Max(1, MeasureInlineRunsWidth(runs, measureFont));
 

@@ -234,8 +234,8 @@ public sealed class MarkdownGdiEditor : ScrollableControl
 
         _state.SetCaret(pos, shift, _doc);
 
-        if (ExitRawModesIfCaretOutside() || SyncCodeFenceRawModeWithCaret())
-            RebuildLayout();
+        // Immer neu aufbauen, damit Raw/Inline-Source-Modus dem Caret folgt
+        RebuildLayout();
 
         NormalizeCaretOutOfTables();
 
@@ -254,8 +254,8 @@ public sealed class MarkdownGdiEditor : ScrollableControl
         var pos = _layout.HitTestText(ClientToContent(e.Location));
         _state.SetCaret(pos, shift: true, _doc);
 
-        if (ExitRawModesIfCaretOutside() || SyncCodeFenceRawModeWithCaret())
-            RebuildLayout();
+        // Immer neu aufbauen, damit Raw/Inline-Source-Modus dem Caret folgt
+        RebuildLayout();
 
         NormalizeCaretOutOfTables();
 
@@ -365,7 +365,6 @@ public sealed class MarkdownGdiEditor : ScrollableControl
                 ApplyDocumentEdit(() => _state.NewLine(_doc));
                 break;
             case Keys.Tab:
-                // LIST / BLOCK indent behavior
                 ApplyDocumentEdit(() => shift
                     ? _state.UnindentLines(_doc, spaces: 2)
                     : _state.IndentLines(_doc, spaces: 2));
@@ -377,8 +376,8 @@ public sealed class MarkdownGdiEditor : ScrollableControl
 
         if (movedCaret)
         {
-            if (ExitRawModesIfCaretOutside() || SyncCodeFenceRawModeWithCaret())
-                RebuildLayout();
+            // Immer neu aufbauen, damit Raw/Inline-Source-Modus dem Caret folgt
+            RebuildLayout();
 
             NormalizeCaretOutOfTables();
             ResetCaretBlink();
@@ -547,6 +546,72 @@ public sealed class MarkdownGdiEditor : ScrollableControl
 
     private IReadOnlySet<int>? GetRawCodeFenceStarts()
         => _rawCodeFenceStartLine.HasValue ? new HashSet<int> { _rawCodeFenceStartLine.Value } : null;
+
+    // NEW: raw-source lines for any block under caret (heading/quote/list/hr)
+    private IReadOnlySet<int>? GetRawSourceLinesForCaretBlock()
+    {
+        var set = GetContainingRawSourceBlockLineSet(_state.Caret.Line);
+        return set is null || set.Count == 0 ? null : set;
+    }
+
+
+    // NEW
+    private HashSet<int>? GetContainingRawSourceBlockLineSet(int caretLine)
+    {
+        if (caretLine < 0 || caretLine >= _doc.LineCount)
+            return null;
+
+        foreach (var b in _doc.Blocks)
+        {
+            if (caretLine < b.StartLine || caretLine > b.EndLine)
+                continue;
+
+            // Tabellen bleiben bei bestehender Tabellenlogik
+            if (b is TableBlock)
+                return null;
+
+            // CodeFence über bestehende Fence-Logik
+            if (b is CodeFenceBlock)
+                return null;
+
+            // Für diese Blöcke Source zeigen, solange Caret im Block ist
+            if (b is HeadingBlock or QuoteBlock or ListBlock || b.Kind == MarkdownBlockKind.HorizontalRule)
+            {
+                var lines = new HashSet<int>();
+                for (int i = Math.Max(0, b.StartLine); i <= Math.Min(_doc.LineCount - 1, b.EndLine); i++)
+                    lines.Add(i);
+                return lines;
+            }
+
+            return null;
+        }
+
+        return null;
+    }
+    private IReadOnlySet<int>? GetRawInlineLinesForCaret()
+    {
+        int line = _state.Caret.Line;
+        if (line < 0 || line >= _doc.LineCount) return null;
+
+        // Keine Inline-Raw-Umschaltung in Tabellen
+        if (IsInsideTable(line)) return null;
+
+        // Keine Inline-Raw-Umschaltung in Codefences
+        if (GetContainingCodeFenceStartLine(line).HasValue) return null;
+
+        // Nur aktuelle Caret-Zeile als Raw-Inline
+        return new HashSet<int> { line };
+    }
+    private bool IsInsideTable(int sourceLine)
+    {
+        foreach (var b in _doc.Blocks)
+        {
+            if (b is TableBlock t && sourceLine >= t.StartLine && sourceLine <= t.EndLine)
+                return true;
+        }
+        return false;
+    }
+
 
     private bool HandleCtrlEnterExitRawTableMode()
     {
@@ -1438,6 +1503,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl
     private void RebuildLayout()
     {
         SyncCodeFenceRawModeWithCaret();
+        ExitRawModesIfCaretOutside();
 
         _layout.Rebuild(
             _doc,
@@ -1446,10 +1512,13 @@ public sealed class MarkdownGdiEditor : ScrollableControl
             _boldFont,
             _monoFont,
             _rawTableStartLines,
-            GetRawCodeFenceStarts());
+            GetRawCodeFenceStarts(),
+            GetRawSourceLinesForCaretBlock(),
+            GetRawInlineLinesForCaret());
 
         AutoScrollMinSize = _layout.ContentSize;
     }
+
 
     private void NormalizeCaretOutOfTables()
     {
@@ -1739,11 +1808,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl
                 int partW = MeasureWidth(part, runFont);
 
                 if (isCode)
-                {
-                    // If we measure only a part of a code run, add chip padding proportionally:
-                    // for any non-empty part still count both paddings to keep caret/hit visually stable.
                     partW += InlineCodePadX * 2;
-                }
 
                 width += partW;
                 remaining -= take;
