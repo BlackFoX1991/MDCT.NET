@@ -23,7 +23,6 @@ public sealed class MarkdownGdiEditor : ScrollableControl
 
     // Tables can be displayed non-destructively as raw source
     private readonly HashSet<int> _rawTableStartLines = new();
-
     private readonly Dictionary<int, Font> _headingFontCache = new();
 
     private readonly List<EditorSnapshot> _undo = new();
@@ -44,13 +43,8 @@ public sealed class MarkdownGdiEditor : ScrollableControl
 
     private int? _rawCodeFenceStartLine;
 
-    private static readonly TextFormatFlags DrawFlags =
-        TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine;
-
     private static readonly TextFormatFlags MeasureFlags =
         TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine;
-
-
 
     private static readonly Regex TableDelimiterCellRegex =
         new(@"^:?-{3,}:?$", RegexOptions.Compiled);
@@ -70,6 +64,14 @@ public sealed class MarkdownGdiEditor : ScrollableControl
     private const int InlineCodePadX = 4;
     private const int InlineCodePadY = 1;
 
+    private static readonly StringFormat DrawStringFormat = new(StringFormat.GenericTypographic)
+    {
+        FormatFlags = StringFormatFlags.NoWrap,
+        Trimming = StringTrimming.None,
+        Alignment = StringAlignment.Near,
+        LineAlignment = StringAlignment.Near
+    };
+
     public event EventHandler<MarkdownChangedEventArgs>? MarkdownChanged;
 
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Visible)]
@@ -83,7 +85,6 @@ public sealed class MarkdownGdiEditor : ScrollableControl
             _doc.LoadMarkdown(value ?? string.Empty);
             EnsureTrailingEditableLineAfterTerminalTable();
 
-            // new content => clear raw-table modes
             _rawTableStartLines.Clear();
             _rawCodeFenceStartLine = null;
 
@@ -126,7 +127,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl
             Invalidate();
         };
 
-        this.Cursor = Cursors.IBeam;
+        Cursor = Cursors.IBeam;
     }
 
     protected override void Dispose(bool disposing)
@@ -179,11 +180,15 @@ public sealed class MarkdownGdiEditor : ScrollableControl
     {
         base.OnScroll(se);
         RepositionCellEditor();
-
-        // Wichtig: komplette Clientfläche neu zeichnen
         Invalidate(new Rectangle(Point.Empty, ClientSize), invalidateChildren: false);
     }
 
+    protected override void OnMouseWheel(MouseEventArgs e)
+    {
+        base.OnMouseWheel(e);
+        RepositionCellEditor();
+        Invalidate(new Rectangle(Point.Empty, ClientSize), invalidateChildren: false);
+    }
 
     protected override void OnGotFocus(EventArgs e)
     {
@@ -205,31 +210,18 @@ public sealed class MarkdownGdiEditor : ScrollableControl
         }
     }
 
-    protected override void OnMouseWheel(MouseEventArgs e)
-    {
-        base.OnMouseWheel(e);
-        RepositionCellEditor();
-
-        // Manche Scroll-Pfade feuern kein sauberes Full-Repaint
-        Invalidate(new Rectangle(Point.Empty, ClientSize), invalidateChildren: false);
-    }
-
-
     protected override void OnMouseDown(MouseEventArgs e)
     {
         base.OnMouseDown(e);
-
         if (e.Button != MouseButtons.Left) return;
 
         Focus();
-
         Point content = ClientToContent(e.Location);
 
-        // Grid hit (only when table is visible as grid)
         if (_layout.TryHitTestTableCell(content, out var th))
         {
             _mouseSelecting = false;
-            BeginTableCellEdit(th.Table, th.Row, th.Col); // single click -> cell edit
+            BeginTableCellEdit(th.Table, th.Row, th.Col);
             return;
         }
 
@@ -282,7 +274,6 @@ public sealed class MarkdownGdiEditor : ScrollableControl
     protected override void OnMouseDoubleClick(MouseEventArgs e)
     {
         base.OnMouseDoubleClick(e);
-
         if (e.Button != MouseButtons.Left) return;
 
         Focus();
@@ -298,7 +289,6 @@ public sealed class MarkdownGdiEditor : ScrollableControl
         if (_cellEditor is not null) return;
         if (char.IsControl(e.KeyChar)) return;
 
-        // Convenience: ">" at visual line start => "> "
         if (e.KeyChar == '>' && IsCaretAtVisualStart())
         {
             ApplyDocumentEdit(() => _state.InsertText(_doc, "> "));
@@ -348,48 +338,38 @@ public sealed class MarkdownGdiEditor : ScrollableControl
             case Keys.Left:
                 movedCaret = _state.MoveLeft(_doc, shift);
                 break;
-
             case Keys.Right:
                 movedCaret = _state.MoveRight(_doc, shift);
                 break;
-
             case Keys.Up:
                 movedCaret = _state.MoveUp(_doc, shift);
                 break;
-
             case Keys.Down:
                 movedCaret = _state.MoveDown(_doc, shift);
                 break;
-
             case Keys.Home:
                 movedCaret = _state.MoveHome(_doc, shift, GetVisualLineStartSourceColumn);
                 break;
-
             case Keys.End:
                 movedCaret = _state.MoveEnd(_doc, shift, GetVisualLineEndSourceColumn);
                 break;
-
             case Keys.Back:
-                {
-                    if (HandleBackspaceEnterTableRawSourceMode())
-                        break;
-
-                    ApplyDocumentEdit(() => _state.Backspace(_doc));
+                if (HandleBackspaceEnterTableRawSourceMode())
                     break;
-                }
-
+                ApplyDocumentEdit(() => _state.Backspace(_doc));
+                break;
             case Keys.Delete:
                 ApplyDocumentEdit(() => _state.Delete(_doc));
                 break;
-
             case Keys.Enter:
                 ApplyDocumentEdit(() => _state.NewLine(_doc));
                 break;
-
             case Keys.Tab:
-                ApplyDocumentEdit(() => _state.InsertText(_doc, "    "));
+                // LIST / BLOCK indent behavior
+                ApplyDocumentEdit(() => shift
+                    ? _state.UnindentLines(_doc, spaces: 2)
+                    : _state.IndentLines(_doc, spaces: 2));
                 break;
-
             default:
                 handled = false;
                 break;
@@ -415,24 +395,20 @@ public sealed class MarkdownGdiEditor : ScrollableControl
 
     private readonly record struct FenceMarker(int Col, int Len, char Char);
 
-    private static bool IsSupportedFenceLen(int len)
-        => len == 1 || len >= 3;
+    private static bool IsSupportedFenceLen(int len) => len == 1 || len >= 3;
 
     private static bool IsEscaped(string s, int index)
     {
         int backslashes = 0;
         for (int i = index - 1; i >= 0 && s[i] == '\\'; i--)
             backslashes++;
-
         return (backslashes % 2) == 1;
     }
 
     private static bool TryFindFenceMarker(string line, int fromIndex, out FenceMarker marker)
     {
         marker = default;
-
-        if (string.IsNullOrEmpty(line))
-            return false;
+        if (string.IsNullOrEmpty(line)) return false;
 
         int from = Math.Clamp(fromIndex, 0, line.Length);
 
@@ -449,6 +425,55 @@ public sealed class MarkdownGdiEditor : ScrollableControl
             if (IsSupportedFenceLen(len))
             {
                 marker = new FenceMarker(i, len, ch);
+                return true;
+            }
+
+            i = j - 1;
+        }
+
+        return false;
+    }
+
+    private static bool TryFindFenceCloser(
+        string line,
+        char expectedChar,
+        int minOpenLen,
+        int fromIndex,
+        out FenceMarker close)
+    {
+        close = default;
+        if (string.IsNullOrEmpty(line)) return false;
+
+        int from = Math.Clamp(fromIndex, 0, line.Length);
+
+        for (int i = from; i < line.Length; i++)
+        {
+            if (line[i] != expectedChar || IsEscaped(line, i))
+                continue;
+
+            int j = i;
+            while (j < line.Length && line[j] == expectedChar) j++;
+
+            int len = j - i;
+            if (!IsSupportedFenceLen(len) || len < minOpenLen)
+            {
+                i = j - 1;
+                continue;
+            }
+
+            bool onlyWhitespaceAfter = true;
+            for (int k = j; k < line.Length; k++)
+            {
+                if (!char.IsWhiteSpace(line[k]))
+                {
+                    onlyWhitespaceAfter = false;
+                    break;
+                }
+            }
+
+            if (onlyWhitespaceAfter)
+            {
+                close = new FenceMarker(i, len, expectedChar);
                 return true;
             }
 
@@ -511,66 +536,6 @@ public sealed class MarkdownGdiEditor : ScrollableControl
         return null;
     }
 
-    private static bool TryFindFenceCloser(
-        string line,
-        char expectedChar,
-        int minOpenLen,
-        int fromIndex,
-        out FenceMarker close)
-    {
-        close = default;
-
-        if (string.IsNullOrEmpty(line))
-            return false;
-
-        int from = Math.Clamp(fromIndex, 0, line.Length);
-
-        for (int i = from; i < line.Length; i++)
-        {
-            if (line[i] != expectedChar || IsEscaped(line, i))
-                continue;
-
-            int j = i;
-            while (j < line.Length && line[j] == expectedChar) j++;
-
-            int len = j - i;
-            if (!IsSupportedFenceLen(len) || len < minOpenLen)
-            {
-                i = j - 1;
-                continue;
-            }
-
-            bool onlyWhitespaceAfter = true;
-            for (int k = j; k < line.Length; k++)
-            {
-                if (!char.IsWhiteSpace(line[k]))
-                {
-                    onlyWhitespaceAfter = false;
-                    break;
-                }
-            }
-
-            if (onlyWhitespaceAfter)
-            {
-                close = new FenceMarker(i, len, expectedChar);
-                return true;
-            }
-
-            i = j - 1;
-        }
-
-        return false;
-    }
-
-    private static bool IsEscapedAt(string s, int index)
-    {
-        int backslashes = 0;
-        for (int i = index - 1; i >= 0 && s[i] == '\\'; i--)
-            backslashes++;
-
-        return (backslashes % 2) == 1;
-    }
-
     private bool SyncCodeFenceRawModeWithCaret()
     {
         int? next = GetContainingCodeFenceStartLine(_state.Caret.Line);
@@ -581,10 +546,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl
     }
 
     private IReadOnlySet<int>? GetRawCodeFenceStarts()
-    {
-        if (!_rawCodeFenceStartLine.HasValue) return null;
-        return new HashSet<int> { _rawCodeFenceStartLine.Value };
-    }
+        => _rawCodeFenceStartLine.HasValue ? new HashSet<int> { _rawCodeFenceStartLine.Value } : null;
 
     private bool HandleCtrlEnterExitRawTableMode()
     {
@@ -613,7 +575,6 @@ public sealed class MarkdownGdiEditor : ScrollableControl
             targetRow = Math.Clamp(targetRow, 0, tableLayout.Rows - 1);
 
             int targetCol = GuessTableColumnFromSource(sourceLine, caretCol, tableLayout.Cols);
-
             BeginTableCellEdit(tableLayout, targetRow, targetCol);
 
             ResetCaretBlink();
@@ -650,20 +611,16 @@ public sealed class MarkdownGdiEditor : ScrollableControl
         if (string.IsNullOrEmpty(line)) return 0;
 
         caretCol = Math.Clamp(caretCol, 0, line.Length);
-
         var pipes = FindUnescapedPipePositions(line);
 
         if (pipes.Count >= 2)
         {
             int cellCount = Math.Min(cols, pipes.Count - 1);
-
             for (int cell = 0; cell < cellCount; cell++)
             {
                 int right = pipes[cell + 1];
-                if (caretCol <= right)
-                    return cell;
+                if (caretCol <= right) return cell;
             }
-
             return cellCount - 1;
         }
 
@@ -675,9 +632,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl
                 i++;
                 continue;
             }
-
-            if (line[i] == '|')
-                separatorsBefore++;
+            if (line[i] == '|') separatorsBefore++;
         }
 
         int idx = Math.Max(0, separatorsBefore - 1);
@@ -687,7 +642,6 @@ public sealed class MarkdownGdiEditor : ScrollableControl
     private static List<int> FindUnescapedPipePositions(string line)
     {
         var result = new List<int>();
-
         for (int i = 0; i < line.Length; i++)
         {
             if (line[i] == '\\' && i + 1 < line.Length && line[i + 1] == '|')
@@ -695,20 +649,12 @@ public sealed class MarkdownGdiEditor : ScrollableControl
                 i++;
                 continue;
             }
-
-            if (line[i] == '|')
-                result.Add(i);
+            if (line[i] == '|') result.Add(i);
         }
-
         return result;
     }
 
-    private enum PendingTableDraftRole
-    {
-        None,
-        Header,
-        Delimiter
-    }
+    private enum PendingTableDraftRole { None, Header, Delimiter }
 
     private readonly record struct PendingTableDraftInfo(
         bool IsPending,
@@ -772,9 +718,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl
         if (cells.Count < 2) return false;
 
         bool allDelimiterLike = cells.All(c => TableDelimiterCellRegex.IsMatch(c.Trim()));
-        if (allDelimiterLike) return false;
-
-        return true;
+        return !allDelimiterLike;
     }
 
     private static bool IsDelimiterCandidate(string line)
@@ -926,7 +870,6 @@ public sealed class MarkdownGdiEditor : ScrollableControl
         {
             int lastLine = _doc.LineCount - 1;
             int lastCol = _doc.GetLineLength(lastLine);
-
             _doc.InsertText(new MarkdownPosition(lastLine, lastCol), "\n");
             _doc.ReparseAll();
         }
@@ -976,21 +919,17 @@ public sealed class MarkdownGdiEditor : ScrollableControl
     {
         base.OnPaint(e);
 
-        // 1) Immer in Client-Koordinaten komplett löschen
         e.Graphics.ResetTransform();
         e.Graphics.Clear(BackColor);
 
-        // 2) Danach auf Content-Koordinaten umstellen
         e.Graphics.TranslateTransform(AutoScrollPosition.X, AutoScrollPosition.Y);
 
-        // 3) Sichtbarer Bereich im Content-System (nicht e.ClipRectangle verwenden)
         Rectangle viewport = new(
             -AutoScrollPosition.X,
             -AutoScrollPosition.Y,
             ClientSize.Width,
             ClientSize.Height);
 
-        // Optional, aber hilfreich gegen Artefakte
         e.Graphics.SetClip(viewport);
 
         DrawSelection(e.Graphics, viewport);
@@ -1035,11 +974,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl
             {
                 string hint = $"Table draft: {draft.CurrentCols}/{draft.ExpectedCols}";
                 using var hintFont = new Font(Font, FontStyle.Italic);
-
-                // FIX: content coords (no ContentTextToClient in paint)
-                var hintPt = new Point(line.TextX + w + 8, line.Bounds.Top + 1);
-                DrawTextGdiPlus(g, hint, hintFont, hintPt, Color.DarkGoldenrod);
-
+                DrawTextGdiPlus(g, hint, hintFont, new Point(line.TextX + w + 8, line.Bounds.Top + 1), Color.DarkGoldenrod);
             }
         }
 
@@ -1061,11 +996,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl
         }
 
         if (!string.IsNullOrEmpty(display))
-        {
-            // FIX: content coords
-            var textPt = new Point(line.TextX, line.Bounds.Top + 1);
-            DrawInlineRuns(g, line, textPt);
-        }
+            DrawInlineRuns(g, line, new Point(line.TextX, line.Bounds.Top + 1));
 
         if (line.Kind == MarkdownBlockKind.Heading && line.HeadingLevel <= 2 && !string.IsNullOrEmpty(display))
         {
@@ -1090,7 +1021,6 @@ public sealed class MarkdownGdiEditor : ScrollableControl
                 g.FillRectangle(r == 0 ? headerBrush : cellBrush, rect);
                 g.DrawRectangle(gridPen, rect);
 
-                // FIX: keep text rect in content coordinates
                 Rectangle textRect = Rectangle.Inflate(rect, -8, -5);
 
                 IReadOnlyList<InlineRun> runs = table.GetCellRuns(r, c);
@@ -1111,18 +1041,12 @@ public sealed class MarkdownGdiEditor : ScrollableControl
                     x = textRect.Right - textWidth;
 
                 x = Math.Max(textRect.Left, x);
-
                 int y = textRect.Top + Math.Max(0, (textRect.Height - MeasureHeight(baseFont)) / 2);
 
                 if (runs.Count > 0)
-                {
                     DrawInlineRunsInCell(g, runs, baseFont, new Point(x, y), textRect, ForeColor);
-                }
                 else
-                {
                     DrawTextGdiPlus(g, fallbackText, baseFont, new Point(x, y), ForeColor);
-
-                }
             }
         }
 
@@ -1148,7 +1072,6 @@ public sealed class MarkdownGdiEditor : ScrollableControl
 
                 int w = MeasureWidth(run.Text, f);
                 if (isCode) w += InlineCodePadX * 2;
-
                 width += w;
             }
         }
@@ -1161,11 +1084,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl
         return width;
     }
 
-    private Font GetOrCreateTableRunFont(
-        Dictionary<int, Font> cache,
-        Font baseFont,
-        InlineStyle style,
-        bool isCode)
+    private Font GetOrCreateTableRunFont(Dictionary<int, Font> cache, Font baseFont, InlineStyle style, bool isCode)
     {
         InlineStyle normalized = style & ~InlineStyle.Code;
 
@@ -1211,7 +1130,6 @@ public sealed class MarkdownGdiEditor : ScrollableControl
                 if (!isCode)
                 {
                     DrawTextGdiPlus(g, run.Text, runFont, new Point(x, start.Y), color);
-
                     x += MeasureWidth(run.Text, runFont);
                     continue;
                 }
@@ -1229,8 +1147,8 @@ public sealed class MarkdownGdiEditor : ScrollableControl
                 g.DrawRectangle(codePen, chip.X, chip.Y, Math.Max(1, chip.Width - 1), Math.Max(1, chip.Height - 1));
 
                 int textY = chip.Y + Math.Max(0, (chip.Height - textH) / 2);
-
                 DrawTextGdiPlus(g, run.Text, runFont, new Point(x + InlineCodePadX, textY), color);
+
                 x += chipW;
             }
         }
@@ -1242,30 +1160,12 @@ public sealed class MarkdownGdiEditor : ScrollableControl
         }
     }
 
-    private static readonly StringFormat DrawStringFormat = new(StringFormat.GenericTypographic)
-    {
-        FormatFlags = StringFormatFlags.NoWrap,
-        Trimming = StringTrimming.None,
-        Alignment = StringAlignment.Near,
-        LineAlignment = StringAlignment.Near
-    };
-
-    private static int MeasureHeight(Font font)
-    {
-        // stabil ohne Graphics-Instanz
-        return (int)Math.Ceiling(font.GetHeight());
-    }
+    private static int MeasureHeight(Font font) => (int)Math.Ceiling(font.GetHeight());
 
     private static int MeasureWidth(string text, Font font)
     {
         if (string.IsNullOrEmpty(text)) return 0;
-
-        // TextRenderer für Maß kann bleiben; DrawString zum Rendern macht den Scroll-Fix.
-        return TextRenderer.MeasureText(
-            text,
-            font,
-            new Size(int.MaxValue, int.MaxValue),
-            TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine).Width;
+        return TextRenderer.MeasureText(text, font, new Size(int.MaxValue, int.MaxValue), MeasureFlags).Width;
     }
 
     private static void DrawTextGdiPlus(Graphics g, string text, Font font, Point pt, Color color)
@@ -1273,56 +1173,6 @@ public sealed class MarkdownGdiEditor : ScrollableControl
         if (string.IsNullOrEmpty(text)) return;
         using var brush = new SolidBrush(color);
         g.DrawString(text, font, brush, pt, DrawStringFormat);
-    }
-
-    private static int MeasureInlineRunsWidth(IReadOnlyList<InlineRun> runs, Font baseFont)
-    {
-        if (runs.Count == 0) return 0;
-
-        int width = 0;
-        var cache = new Dictionary<InlineStyle, Font>();
-
-        try
-        {
-            foreach (var run in runs)
-            {
-                if (string.IsNullOrEmpty(run.Text)) continue;
-                Font f = GetOrCreateInlineFont(cache, baseFont, run.Style);
-                width += MeasureWidth(run.Text, f);
-            }
-        }
-        finally
-        {
-            foreach (var f in cache.Values)
-                f.Dispose();
-        }
-
-        return width;
-    }
-
-    private static void DrawInlineRunsRaw(Graphics g, IReadOnlyList<InlineRun> runs, Font baseFont, Point start, Color color)
-    {
-        int x = start.X;
-        var cache = new Dictionary<InlineStyle, Font>();
-
-        try
-        {
-            foreach (var run in runs)
-            {
-                if (string.IsNullOrEmpty(run.Text)) continue;
-
-                Font runFont = GetOrCreateInlineFont(cache, baseFont, run.Style);
-
-                DrawTextGdiPlus(g, run.Text, runFont, new Point(x, start.Y), color);
-
-                x += MeasureWidth(run.Text, runFont);
-            }
-        }
-        finally
-        {
-            foreach (var f in cache.Values)
-                f.Dispose();
-        }
     }
 
     private void DrawSelection(Graphics g, Rectangle viewport)
@@ -1391,9 +1241,11 @@ public sealed class MarkdownGdiEditor : ScrollableControl
                 EnsureCaretVisible();
                 Invalidate();
                 return true;
+
             case Keys.C:
                 CopySelection();
                 return true;
+
             case Keys.X:
                 if (_state.HasSelection)
                 {
@@ -1401,6 +1253,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl
                     ApplyDocumentEdit(() => _state.DeleteSelection(_doc));
                 }
                 return true;
+
             case Keys.V:
                 if (Clipboard.ContainsText())
                 {
@@ -1409,9 +1262,11 @@ public sealed class MarkdownGdiEditor : ScrollableControl
                         ApplyDocumentEdit(() => _state.InsertText(_doc, t));
                 }
                 return true;
+
             case Keys.Z:
                 Undo();
                 return true;
+
             case Keys.Y:
                 Redo();
                 return true;
@@ -1502,7 +1357,6 @@ public sealed class MarkdownGdiEditor : ScrollableControl
         EndCellEdit(discard: false, move: CellMove.None);
 
         EditorSnapshot before = CaptureSnapshot();
-
         bool changed = editOperation();
         if (!changed) return;
 
@@ -1528,7 +1382,6 @@ public sealed class MarkdownGdiEditor : ScrollableControl
     private void Undo()
     {
         EndCellEdit(discard: false, move: CellMove.None);
-
         if (_undo.Count == 0) return;
 
         EditorSnapshot current = CaptureSnapshot();
@@ -1542,7 +1395,6 @@ public sealed class MarkdownGdiEditor : ScrollableControl
     private void Redo()
     {
         EndCellEdit(discard: false, move: CellMove.None);
-
         if (_redo.Count == 0) return;
 
         EditorSnapshot current = CaptureSnapshot();
@@ -1630,7 +1482,6 @@ public sealed class MarkdownGdiEditor : ScrollableControl
         EndCellEdit(discard: false, move: CellMove.None);
 
         TableBlock table = tableLayout.Block;
-
         _rawTableStartLines.Add(table.StartLine);
         RebuildLayout();
 
@@ -1675,7 +1526,6 @@ public sealed class MarkdownGdiEditor : ScrollableControl
     private static int MapGridRowToSourceLine(TableBlock table, int gridRow)
     {
         if (gridRow <= 0) return table.StartLine;
-
         int line = table.StartLine + gridRow + 1;
         return Math.Clamp(line, table.StartLine, table.EndLine);
     }
@@ -1717,7 +1567,6 @@ public sealed class MarkdownGdiEditor : ScrollableControl
 
         int srcCol = Math.Clamp(_state.Caret.Column, 0, line.SourceText.Length);
         int visCol = line.Projection.SourceToVisual[srcCol];
-
         string display = line.Projection.DisplayText;
         visCol = Math.Clamp(visCol, 0, display.Length);
 
@@ -1779,26 +1628,22 @@ public sealed class MarkdownGdiEditor : ScrollableControl
     }
 
     private Font GetRenderFont(LayoutLine line)
+        => line.Kind == MarkdownBlockKind.Heading ? GetHeadingFontCached(line.HeadingLevel) : GetFont(line.FontRole);
+
+    private static Font GetOrCreateInlineFont(Dictionary<int, Font> cache, Font baseFont, InlineStyle style, bool isCode, Font monoFont)
     {
-        if (line.Kind == MarkdownBlockKind.Heading)
-            return GetHeadingFontCached(line.HeadingLevel);
+        InlineStyle normalized = style & ~InlineStyle.Code;
 
-        return GetFont(line.FontRole);
-    }
+        int key = ((int)normalized & 0xFF)
+                  | (isCode ? 0x100 : 0)
+                  | (((int)baseFont.Style & 0xFF) << 9);
 
-    private static Font GetOrCreateInlineFont(
-        Dictionary<InlineStyle, Font> cache,
-        Font baseFont,
-        InlineStyle style)
-    {
-        if (style == InlineStyle.None)
-            return baseFont;
-
-        if (cache.TryGetValue(style, out var f))
+        if (cache.TryGetValue(key, out var f))
             return f;
 
-        f = InlineMarkdown.CreateStyledFont(baseFont, style);
-        cache[style] = f;
+        Font seed = isCode ? monoFont : baseFont;
+        f = InlineMarkdown.CreateStyledFont(seed, normalized);
+        cache[key] = f;
         return f;
     }
 
@@ -1812,12 +1657,14 @@ public sealed class MarkdownGdiEditor : ScrollableControl
         if (line.InlineRuns is null || line.InlineRuns.Count == 0)
         {
             DrawTextGdiPlus(g, display, baseFont, contentTextStart, ForeColor);
-
             return;
         }
 
         int x = contentTextStart.X;
-        var cache = new Dictionary<InlineStyle, Font>();
+        var cache = new Dictionary<int, Font>();
+
+        using var codeBrush = new SolidBrush(_inlineCodeBg);
+        using var codePen = new Pen(_inlineCodeBorder);
 
         try
         {
@@ -1825,11 +1672,32 @@ public sealed class MarkdownGdiEditor : ScrollableControl
             {
                 if (string.IsNullOrEmpty(run.Text)) continue;
 
-                Font runFont = GetOrCreateInlineFont(cache, baseFont, run.Style);
+                bool isCode = (run.Style & InlineStyle.Code) != 0;
+                Font runFont = GetOrCreateInlineFont(cache, baseFont, run.Style, isCode, _monoFont);
 
-                DrawTextGdiPlus(g, run.Text, runFont, new Point(x, contentTextStart.Y), ForeColor);
+                if (!isCode)
+                {
+                    DrawTextGdiPlus(g, run.Text, runFont, new Point(x, contentTextStart.Y), ForeColor);
+                    x += MeasureWidth(run.Text, runFont);
+                    continue;
+                }
 
-                x += MeasureWidth(run.Text, runFont);
+                int textW = MeasureWidth(run.Text, runFont);
+                int textH = MeasureHeight(runFont);
+
+                int chipW = textW + InlineCodePadX * 2;
+                int chipH = Math.Max(1, textH + InlineCodePadY * 2);
+                int chipY = contentTextStart.Y + Math.Max(0, (line.Bounds.Height - chipH) / 2);
+
+                var chip = new Rectangle(x, chipY, chipW, chipH);
+
+                g.FillRectangle(codeBrush, chip);
+                g.DrawRectangle(codePen, chip.X, chip.Y, Math.Max(1, chip.Width - 1), Math.Max(1, chip.Height - 1));
+
+                int textY = chip.Y + Math.Max(0, (chip.Height - textH) / 2);
+                DrawTextGdiPlus(g, run.Text, runFont, new Point(x + InlineCodePadX, textY), ForeColor);
+
+                x += chipW;
             }
         }
         finally
@@ -1852,8 +1720,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl
 
         int remaining = visualCols;
         int width = 0;
-
-        var cache = new Dictionary<InlineStyle, Font>();
+        var cache = new Dictionary<int, Font>();
 
         try
         {
@@ -1865,11 +1732,20 @@ public sealed class MarkdownGdiEditor : ScrollableControl
                 int take = Math.Min(remaining, run.Text.Length);
                 if (take <= 0) continue;
 
+                bool isCode = (run.Style & InlineStyle.Code) != 0;
+                Font runFont = GetOrCreateInlineFont(cache, baseFont, run.Style, isCode, _monoFont);
+
                 string part = take == run.Text.Length ? run.Text : run.Text[..take];
+                int partW = MeasureWidth(part, runFont);
 
-                Font runFont = GetOrCreateInlineFont(cache, baseFont, run.Style);
-                width += MeasureWidth(part, runFont);
+                if (isCode)
+                {
+                    // If we measure only a part of a code run, add chip padding proportionally:
+                    // for any non-empty part still count both paddings to keep caret/hit visually stable.
+                    partW += InlineCodePadX * 2;
+                }
 
+                width += partW;
                 remaining -= take;
             }
         }
@@ -1895,25 +1771,6 @@ public sealed class MarkdownGdiEditor : ScrollableControl
         LineFontRole.Mono => _monoFont,
         _ => Font
     };
-    private static float HeadingScale(int level)
-    {
-        int l = Math.Clamp(level, 1, 6);
-        return l switch
-        {
-            1 => 2.00f,
-            2 => 1.50f,
-            3 => 1.25f,
-            4 => 1.10f,
-            5 => 1.00f,
-            _ => 0.90f
-        };
-    }
-
-    private static Font CreateHeadingFont(Font baseFont, int level)
-    {
-        float size = Math.Max(6f, baseFont.Size * HeadingScale(level));
-        return new Font(baseFont.FontFamily, size, FontStyle.Bold, GraphicsUnit.Point);
-    }
 
     private static Font CreateMonoFont(float size)
     {
@@ -1925,15 +1782,11 @@ public sealed class MarkdownGdiEditor : ScrollableControl
                 using var ff = new FontFamily(name);
                 return new Font(ff, size);
             }
-            catch
-            {
-            }
+            catch { }
         }
 
         return new Font(SystemFonts.DefaultFont.FontFamily, size);
     }
-
-    
 
     private Point ClientToContent(Point p)
         => new(p.X - AutoScrollPosition.X, p.Y - AutoScrollPosition.Y);
@@ -1943,6 +1796,10 @@ public sealed class MarkdownGdiEditor : ScrollableControl
 
     private static bool IsHorizontalRule(MarkdownBlockKind kind)
         => string.Equals(kind.ToString(), "HorizontalRule", StringComparison.Ordinal);
+
+    // -----------------------------
+    // Table grid editing
+    // -----------------------------
 
     private void BeginTableCellEdit(TableLayout table, int row, int col)
     {
@@ -2072,7 +1929,6 @@ public sealed class MarkdownGdiEditor : ScrollableControl
 
             int targetRow = row;
             int targetCol = col;
-
             bool reopen = move is CellMove.Next or CellMove.Previous;
 
             if (move == CellMove.Next)

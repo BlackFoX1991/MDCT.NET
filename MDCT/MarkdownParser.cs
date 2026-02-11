@@ -1,4 +1,6 @@
-﻿using System.Text;
+﻿using System;
+using System.Collections.Generic;
+using System.Text;
 using System.Text.RegularExpressions;
 
 namespace MarkdownGdi;
@@ -7,8 +9,6 @@ public static class MarkdownParser
 {
     private static readonly Regex HeadingRegex = new(@"^\s*(#{1,6})\s+(.+?)\s*$", RegexOptions.Compiled);
     private static readonly Regex QuoteRegex = new(@"^\s*>\s?.*$", RegexOptions.Compiled);
-    private static readonly Regex OrderedListRegex = new(@"^\s*\d+\.\s+.+$", RegexOptions.Compiled);
-    private static readonly Regex UnorderedListRegex = new(@"^\s*[-+*]\s+.+$", RegexOptions.Compiled);
     private static readonly Regex FenceStartRegex = new(@"^\s*(```+|~~~+)\s*(.*)$", RegexOptions.Compiled);
 
     // Horizontal Rule: ---  ***  ___  (auch mit Spaces dazwischen)
@@ -18,6 +18,14 @@ public static class MarkdownParser
 
     // Gültige Delimiter-Zelle: ---  :---  ---:  :---: (mind. 3 Bindestriche)
     private static readonly Regex TableDelimiterCellRegex = new(@"^:?-{3,}:?$", RegexOptions.Compiled);
+
+    // List line:
+    // indent + (unordered marker OR ordered number.) + at least one whitespace + text (can be empty/space)
+    // Beispiele:
+    // "- a", "  * b", "    + c", "1. x", "  42. y"
+    private static readonly Regex ListLineRegex = new(
+        @"^(?<indent>[ \t]*)(?:(?<ul>[-+*])|(?<num>\d+)\.)(?<ws>[ \t]+)(?<text>.*)$",
+        RegexOptions.Compiled);
 
     public static IReadOnlyList<MarkdownBlock> Parse(IReadOnlyList<string> lines)
     {
@@ -77,12 +85,18 @@ public static class MarkdownParser
             if (IsListLine(line))
             {
                 int start = i;
-                bool ordered = OrderedListRegex.IsMatch(lines[i]);
+                var listLines = new List<(int SourceLine, string Text)>();
 
                 while (i < lines.Count && IsListLine(lines[i]))
+                {
+                    listLines.Add((i, lines[i]));
                     i++;
+                }
 
-                blocks.Add(new ListBlock(start, i - 1, ordered));
+                var items = ParseListItems(listLines);
+                bool isOrderedTopLevel = AreAllTopLevelItemsOrdered(items);
+
+                blocks.Add(new ListBlock(start, i - 1, items, isOrderedTopLevel));
                 continue;
             }
 
@@ -102,7 +116,115 @@ public static class MarkdownParser
     }
 
     private static bool IsListLine(string line)
-        => OrderedListRegex.IsMatch(line) || UnorderedListRegex.IsMatch(line);
+        => ListLineRegex.IsMatch(line);
+
+    private static List<ListItem> ParseListItems(IReadOnlyList<(int SourceLine, string Text)> listLines)
+    {
+        var result = new List<ListItem>(listLines.Count);
+
+        // Stack enthält Indent-Werte, die die aktuelle Hierarchie repräsentieren.
+        // Beispiel Indents: 0,2,4 => Levels 0,1,2
+        var indentStack = new List<int>();
+
+        foreach (var (sourceLine, raw) in listLines)
+        {
+            if (!TryParseListLine(raw, out var parsed))
+                continue; // defensive; sollte wegen Vorfilter nicht passieren
+
+            int indent = parsed.Indent;
+
+            // Solange wir nicht tiefer sind, auf passende Parent-Ebene zurück.
+            while (indentStack.Count > 0 && indent <= indentStack[^1])
+                indentStack.RemoveAt(indentStack.Count - 1);
+
+            int level = indentStack.Count;
+            indentStack.Add(indent);
+
+            result.Add(new ListItem(
+                SourceLine: sourceLine,
+                Indent: indent,
+                Level: level,
+                MarkerKind: parsed.MarkerKind,
+                UnorderedMarker: parsed.UnorderedMarker,
+                OrderedNumber: parsed.OrderedNumber,
+                Text: parsed.Text));
+        }
+
+        return result;
+    }
+
+    private static bool AreAllTopLevelItemsOrdered(IReadOnlyList<ListItem> items)
+    {
+        bool hasTop = false;
+        foreach (var it in items)
+        {
+            if (it.Level != 0) continue;
+            hasTop = true;
+            if (it.MarkerKind != ListMarkerKind.Ordered)
+                return false;
+        }
+
+        return hasTop;
+    }
+
+    private readonly record struct ParsedListLine(
+        int Indent,
+        ListMarkerKind MarkerKind,
+        char? UnorderedMarker,
+        int? OrderedNumber,
+        string Text);
+
+    private static bool TryParseListLine(string line, out ParsedListLine parsed)
+    {
+        parsed = default;
+
+        var m = ListLineRegex.Match(line);
+        if (!m.Success) return false;
+
+        string indentRaw = m.Groups["indent"].Value;
+        int indent = NormalizeIndent(indentRaw);
+
+        Group ul = m.Groups["ul"];
+        Group num = m.Groups["num"];
+        string text = m.Groups["text"].Value;
+
+        if (ul.Success)
+        {
+            char marker = ul.Value[0];
+            parsed = new ParsedListLine(
+                Indent: indent,
+                MarkerKind: ListMarkerKind.Unordered,
+                UnorderedMarker: marker,
+                OrderedNumber: null,
+                Text: text);
+            return true;
+        }
+
+        if (num.Success && int.TryParse(num.Value, out int n))
+        {
+            parsed = new ParsedListLine(
+                Indent: indent,
+                MarkerKind: ListMarkerKind.Ordered,
+                UnorderedMarker: null,
+                OrderedNumber: n,
+                Text: text);
+            return true;
+        }
+
+        return false;
+    }
+
+    // Tabs werden für Einrückung auf 4 Spaces normalisiert.
+    private static int NormalizeIndent(string indent)
+    {
+        int count = 0;
+        foreach (char ch in indent)
+        {
+            if (ch == '\t') count += 4;
+            else if (ch == ' ') count++;
+        }
+        return count;
+    }
 
     private static bool IsHorizontalRule(string line)
         => HorizontalRuleRegex.IsMatch(line);
@@ -158,8 +280,7 @@ public static class MarkdownParser
         }
 
         // Editor-friendly:
-        // Unclosed fence => NICHT als CodeFenceBlock parsen,
-        // damit nicht der Rest des Dokuments "im Codeblock hängt".
+        // Unclosed fence => NICHT als CodeFenceBlock parsen.
         if (close < 0)
             return false;
 
@@ -167,7 +288,6 @@ public static class MarkdownParser
         i = close + 1;
         return true;
     }
-
 
     private static bool IsFenceClose(string line, char fenceChar, int minFenceLen)
     {
@@ -181,7 +301,7 @@ public static class MarkdownParser
             leadingSpaces++;
         }
 
-        // Danach muss direkt die Fence beginnen (kein Text davor)
+        // Danach muss direkt die Fence beginnen
         int count = 0;
         while (i < line.Length && line[i] == fenceChar)
         {
@@ -200,7 +320,6 @@ public static class MarkdownParser
 
         return true;
     }
-
 
     // ---------- TABLES (strict) ----------
 
@@ -258,17 +377,15 @@ public static class MarkdownParser
         headerCells = ParseTableCells(headerLine);
         alignments = new List<TableAlignment>();
 
-        // Für Editor-UX: min. 2 Spalten (vermeidet frühe False-Positives)
+        // Für Editor-UX: min. 2 Spalten
         if (headerCells.Count < 2) return false;
 
-        // Strikt: beide Zeilen müssen wie echte Tabellenzeilen aussehen
-        // z.B. "| A | B |" und "| --- | --- |"
+        // Strikt: beide Zeilen müssen echt table-like sein
         if (!IsPipeBounded(headerLine) || !IsPipeBounded(delimiterLine))
             return false;
 
         var delimiterCells = ParseTableCells(delimiterLine);
 
-        // Delimiter muss exakt die gleiche Spaltenanzahl wie Header haben
         if (delimiterCells.Count != headerCells.Count)
             return false;
 
@@ -303,7 +420,7 @@ public static class MarkdownParser
     private static bool IsPipeBounded(string line)
     {
         string s = line.Trim();
-        return s.StartsWith("|") && s.EndsWith("|");
+        return s.StartsWith("|", StringComparison.Ordinal) && s.EndsWith("|", StringComparison.Ordinal);
     }
 
     private static bool IsSpecialStart(IReadOnlyList<string> lines, int i)
@@ -317,8 +434,7 @@ public static class MarkdownParser
         if (IsListLine(line)) return true;
         if (IsPotentialTableStart(lines, i)) return true;
 
-        // Fence nur dann als "special start", wenn später auch ein passendes Ende existiert.
-        // Sonst bleibt es normaler Paragraph-Text (Editor-UX).
+        // Fence nur dann special, wenn später ein Ende existiert.
         var m = FenceStartRegex.Match(line);
         if (m.Success)
         {
@@ -333,14 +449,13 @@ public static class MarkdownParser
         return false;
     }
 
-
     // Splittet Zellen und unterstützt escaped pipes "\|"
     private static List<string> ParseTableCells(string line)
     {
         string s = line.Trim();
 
-        if (s.StartsWith("|")) s = s[1..];
-        if (s.EndsWith("|")) s = s[..^1];
+        if (s.StartsWith("|", StringComparison.Ordinal)) s = s[1..];
+        if (s.EndsWith("|", StringComparison.Ordinal)) s = s[..^1];
 
         var cells = new List<string>();
         var sb = new StringBuilder();
@@ -353,7 +468,7 @@ public static class MarkdownParser
             if (ch == '\\' && i + 1 < s.Length && s[i + 1] == '|')
             {
                 sb.Append('|');
-                i++; // nächstes Zeichen überspringen
+                i++;
                 continue;
             }
 

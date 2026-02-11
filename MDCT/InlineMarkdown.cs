@@ -39,19 +39,20 @@ public static class InlineMarkdown
                 new[] { 0 });
         }
 
+        int srcN = input.Length;
+
         var runs = new List<InlineRun>();
         var sb = new StringBuilder();
 
         InlineStyle style = InlineStyle.None;
 
-        int srcN = input.Length;
+        // Mapping arrays
         var sourceToVisual = new int[srcN + 1];
-
-        // visualToSource[v] = source index at visual caret position v
         var visualToSource = new List<int>(srcN + 1) { 0 };
 
         int outPos = 0;
         int i = 0;
+
         sourceToVisual[0] = 0;
 
         void FlushRun()
@@ -74,14 +75,14 @@ public static class InlineMarkdown
                 // escaped char visible as literal
                 sb.Append(input[i + 1]);
                 outPos++;
-                visualToSource.Add(i + 2);
+                visualToSource.Add(i + 2);     // caret after consumed escaped char
                 sourceToVisual[i + 2] = outPos;
 
                 i += 2;
                 continue;
             }
 
-            // Inline code: `code` oder ```code``` (1 oder >=3, gleicher Delimiter zum Schließen)
+            // Inline code: `code` or ```code``` (1 or >=3, same delimiter to close)
             if (TryReadCodeSpan(input, i, out int codeMarkerLen, out int closeMarkerPos))
             {
                 FlushRun();
@@ -139,11 +140,32 @@ public static class InlineMarkdown
         FlushRun();
 
         // Important: visual end must map to real source end
-        visualToSource[^1] = srcN;
+        if (visualToSource.Count == 0)
+            visualToSource.Add(srcN);
+        else
+            visualToSource[^1] = srcN;
+
         sourceToVisual[srcN] = outPos;
 
+        // Fill still-unset gaps in source->visual with monotonic carry
+        // (keeps cursor navigation deterministic across hidden markers)
+        int carry = 0;
+        for (int s = 0; s <= srcN; s++)
+        {
+            if (sourceToVisual[s] < carry)
+                sourceToVisual[s] = carry;
+
+            carry = sourceToVisual[s];
+        }
+
+        // Build text from runs
         string text = string.Concat(runs.ConvertAll(r => r.Text));
-        return new InlineParseResult(text, runs, visualToSource.ToArray(), sourceToVisual);
+
+        return new InlineParseResult(
+            text,
+            runs,
+            visualToSource.ToArray(),
+            sourceToVisual);
     }
 
     public static Font CreateStyledFont(Font baseFont, InlineStyle style)
@@ -154,7 +176,7 @@ public static class InlineMarkdown
         if ((style & InlineStyle.Italic) != 0) fs |= FontStyle.Italic;
         if ((style & InlineStyle.Strike) != 0) fs |= FontStyle.Strikeout;
 
-        // InlineStyle.Code steuert Rendering (Mono + Hintergrund), kein FontStyle-Flag
+        // InlineStyle.Code steuert Rendering (Mono + Background), kein FontStyle-Flag
         return new Font(
             baseFont.FontFamily,
             baseFont.Size,
@@ -185,7 +207,7 @@ public static class InlineMarkdown
 
         int run = CountRun(s, i, '`');
 
-        // Nur 1 oder >=3 zulassen
+        // Only 1 or >=3
         if (!(run == 1 || run >= 3))
             return false;
 
@@ -229,13 +251,14 @@ public static class InlineMarkdown
         markerLen = 0;
         toggleStyle = InlineStyle.None;
 
+        if (i < 0 || i >= s.Length) return false;
+
         char ch = s[i];
         if (ch is not ('*' or '_' or '~')) return false;
+        if (IsEscapedAt(s, i)) return false;
 
         int run = CountRun(s, i, ch);
-
-        // Do not look inside the same contiguous marker run.
-        int scanStart = i + run;
+        int scanStart = i + run; // don't look inside same contiguous marker run
 
         if (ch is '*' or '_')
         {
@@ -334,6 +357,7 @@ public static class InlineMarkdown
                 return true;
             }
 
+            // Optional single ~ close if already in strike mode
             if (HasStyle(currentStyle, InlineStyle.Strike))
             {
                 markerLen = 1;
@@ -378,7 +402,8 @@ public static class InlineMarkdown
         {
             if (s[p] == '\\')
             {
-                p++; // skip escaped char
+                // skip escaped next char if present
+                if (p + 1 < s.Length) p++;
                 continue;
             }
 

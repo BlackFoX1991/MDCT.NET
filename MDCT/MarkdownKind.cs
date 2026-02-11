@@ -10,7 +10,7 @@ public enum MarkdownBlockKind
     Quote,
     List,
     CodeFence,
-    HorizontalRule, // neu
+    HorizontalRule,
     Table
 }
 
@@ -20,6 +20,15 @@ public enum TableAlignment
     Left,
     Center,
     Right
+}
+
+/// <summary>
+/// Listentyp für einzelne Einträge.
+/// </summary>
+public enum ListMarkerKind
+{
+    Unordered, // -, *, +
+    Ordered    // 1., 2., ...
 }
 
 public abstract record MarkdownBlock(int StartLine, int EndLine, MarkdownBlockKind Kind);
@@ -36,8 +45,43 @@ public sealed record HeadingBlock(int Line, int Level, string Text)
 public sealed record QuoteBlock(int StartLine, int EndLine)
     : MarkdownBlock(StartLine, EndLine, MarkdownBlockKind.Quote);
 
-public sealed record ListBlock(int StartLine, int EndLine, bool Ordered)
-    : MarkdownBlock(StartLine, EndLine, MarkdownBlockKind.List);
+/// <summary>
+/// Ein einzelner Listeneintrag (inkl. Nested-Informationen).
+/// </summary>
+/// <param name="SourceLine">Quellzeile des Listeneintrags.</param>
+/// <param name="Indent">Einrückung (Anzahl führender Spaces; Tabs ggf. vorher normalisieren).</param>
+/// <param name="Level">Verschachtelungsebene (0 = top-level).</param>
+/// <param name="MarkerKind">Ordered oder Unordered.</param>
+/// <param name="UnorderedMarker">Originalmarker bei Unordered ('-', '*', '+'), sonst null.</param>
+/// <param name="OrderedNumber">Aus Quelltext gelesene Nummer bei Ordered (z.B. 1), sonst null.</param>
+/// <param name="Text">Inhaltstext des Eintrags (ohne Marker).</param>
+public sealed record ListItem(
+    int SourceLine,
+    int Indent,
+    int Level,
+    ListMarkerKind MarkerKind,
+    char? UnorderedMarker,
+    int? OrderedNumber,
+    string Text);
+
+/// <summary>
+/// Listenblock kann gemischt/nested sein.
+/// IsOrdered bleibt für Legacy/Kompatibilität erhalten:
+/// - true: alle Top-Level-Items ordered
+/// - false: sonst (mixed oder unordered)
+/// </summary>
+public sealed record ListBlock(
+    int StartLine,
+    int EndLine,
+    IReadOnlyList<ListItem> Items,
+    bool IsOrdered = false)
+    : MarkdownBlock(StartLine, EndLine, MarkdownBlockKind.List)
+{
+    /// <summary>
+    /// Legacy-Alias, damit alter Code mit ".Ordered" weiter kompiliert.
+    /// </summary>
+    public bool Ordered => IsOrdered;
+}
 
 public sealed record CodeFenceBlock(int StartLine, int EndLine, string Fence, string Language)
     : MarkdownBlock(StartLine, EndLine, MarkdownBlockKind.CodeFence);

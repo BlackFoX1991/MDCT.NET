@@ -51,10 +51,14 @@ public sealed class VisualProjection
         int[] v2s = new int[visN + 1];
         int[] s2v = new int[srcN + 1];
 
-        for (int v = 0; v <= visN; v++) v2s[v] = v + prefixLen;
+        for (int v = 0; v <= visN; v++)
+            v2s[v] = v + prefixLen;
 
-        for (int s = 0; s <= prefixLen; s++) s2v[s] = 0;
-        for (int s = prefixLen + 1; s <= srcN; s++) s2v[s] = s - prefixLen;
+        for (int s = 0; s <= prefixLen; s++)
+            s2v[s] = 0;
+
+        for (int s = prefixLen + 1; s <= srcN; s++)
+            s2v[s] = s - prefixLen;
 
         return new VisualProjection(display, v2s, s2v);
     }
@@ -65,44 +69,46 @@ internal static class ProjectionFactory
     public static VisualProjection Build(MarkdownBlockKind kind, string source)
     {
         source ??= string.Empty;
-        if (source.Length == 0) return VisualProjection.Identity(source);
+        if (source.Length == 0)
+            return VisualProjection.Identity(source);
 
         if (kind == MarkdownBlockKind.Quote)
-        {
-            int ws = LeadingWhitespace(source);
-            if (ws < source.Length && source[ws] == '>')
-            {
-                int prefix = ws + 1;
-                if (prefix < source.Length && source[prefix] == ' ') prefix++;
-                return VisualProjection.HidePrefix(source, prefix);
-            }
-        }
+            return BuildQuoteProjection(source);
 
         if (kind == MarkdownBlockKind.Heading)
+            return BuildHeadingProjection(source);
+
+        // List handling is intentionally NOT done here anymore.
+        // It is handled in LayoutEngine with parser-provided ListItem metadata
+        // (ordered/unordered + nested level + stable mapping).
+        return VisualProjection.Identity(source);
+    }
+
+    private static VisualProjection BuildQuoteProjection(string source)
+    {
+        int ws = LeadingWhitespace(source);
+        if (ws < source.Length && source[ws] == '>')
         {
-            int ws = LeadingWhitespace(source);
-            int i = ws;
-            while (i < source.Length && source[i] == '#') i++;
-            if (i > ws && i < source.Length && source[i] == ' ')
-                return VisualProjection.HidePrefix(source, i + 1);
+            int prefix = ws + 1;
+            if (prefix < source.Length && source[prefix] == ' ')
+                prefix++;
+
+            return VisualProjection.HidePrefix(source, prefix);
         }
 
-        if (kind == MarkdownBlockKind.List)
-        {
-            int ws = LeadingWhitespace(source);
+        return VisualProjection.Identity(source);
+    }
 
-            if (ws + 1 < source.Length)
-            {
-                char c = source[ws];
-                if ((c == '-' || c == '+' || c == '*') && source[ws + 1] == ' ')
-                    return VisualProjection.HidePrefix(source, ws + 2);
-            }
+    private static VisualProjection BuildHeadingProjection(string source)
+    {
+        int ws = LeadingWhitespace(source);
+        int i = ws;
 
-            int p = ws;
-            while (p < source.Length && char.IsDigit(source[p])) p++;
-            if (p > ws && p + 1 < source.Length && source[p] == '.' && source[p + 1] == ' ')
-                return VisualProjection.HidePrefix(source, p + 2);
-        }
+        while (i < source.Length && source[i] == '#')
+            i++;
+
+        if (i > ws && i < source.Length && source[i] == ' ')
+            return VisualProjection.HidePrefix(source, i + 1);
 
         return VisualProjection.Identity(source);
     }
@@ -110,7 +116,9 @@ internal static class ProjectionFactory
     private static int LeadingWhitespace(string s)
     {
         int i = 0;
-        while (i < s.Length && char.IsWhiteSpace(s[i])) i++;
+        while (i < s.Length && char.IsWhiteSpace(s[i]))
+            i++;
+
         return i;
     }
 }

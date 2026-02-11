@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Generic;
 
 namespace MarkdownGdi;
 
@@ -237,7 +238,6 @@ public sealed class EditorState
 
     /// <summary>
     /// Move caret to visual line end and optionally toggle with true source line end if they differ.
-    /// (Currently mostly equal for prefix-only projections, but this is future-proof.)
     /// </summary>
     public bool MoveEnd(DocumentModel doc, bool shift, Func<int, int>? getVisualEndSourceColumn)
     {
@@ -254,9 +254,7 @@ public sealed class EditorState
         }
         else
         {
-            // symmetric toggle
-            if (Caret.Column == visualEnd) targetCol = hardEnd;
-            else targetCol = visualEnd;
+            targetCol = (Caret.Column == visualEnd) ? hardEnd : visualEnd;
         }
 
         var target = new MarkdownPosition(Caret.Line, targetCol);
@@ -273,6 +271,161 @@ public sealed class EditorState
         Caret = new MarkdownPosition(last, doc.GetLineLength(last));
         NormalizeCollapsedSelection();
         _preferredColumn = null;
+    }
+
+    // ------------------------------------------------------------
+    // Optional helpers for list editing (Tab / Shift+Tab)
+    // ------------------------------------------------------------
+
+    /// <summary>
+    /// Indent current line or all selected lines by inserting leading spaces.
+    /// Returns true if document changed.
+    /// </summary>
+    public bool IndentLines(DocumentModel doc, int spaces = 2)
+    {
+        spaces = Math.Max(1, spaces);
+
+        if (!TryGetAffectedLineRange(doc, out int lineStart, out int lineEnd))
+            return false;
+
+        string prefix = new(' ', spaces);
+
+        for (int line = lineStart; line <= lineEnd; line++)
+            doc.InsertText(new MarkdownPosition(line, 0), prefix);
+
+        if (HasSelection)
+        {
+            var (s, e) = GetSelection();
+
+            // Shift anchor/caret only for affected lines.
+            MarkdownPosition shiftedA = ShiftColumnIfAffected(s, lineStart, lineEnd, +spaces);
+            MarkdownPosition shiftedB = ShiftColumnIfAffected(e, lineStart, lineEnd, +spaces);
+
+            Anchor = doc.ClampPosition(shiftedA);
+            Caret = doc.ClampPosition(shiftedB);
+            NormalizeCollapsedSelection();
+        }
+        else
+        {
+            Caret = doc.ClampPosition(new MarkdownPosition(Caret.Line, Caret.Column + spaces));
+        }
+
+        _preferredColumn = null;
+        return true;
+    }
+
+    /// <summary>
+    /// Unindent current line or all selected lines by removing up to 'spaces' leading spaces (or a leading tab).
+    /// Returns true if document changed.
+    /// </summary>
+    public bool UnindentLines(DocumentModel doc, int spaces = 2)
+    {
+        spaces = Math.Max(1, spaces);
+
+        if (!TryGetAffectedLineRange(doc, out int lineStart, out int lineEnd))
+            return false;
+
+        bool changed = false;
+        var removedByLine = new Dictionary<int, int>();
+
+        for (int line = lineStart; line <= lineEnd; line++)
+        {
+            string text = doc.GetLine(line);
+            if (text.Length == 0) continue;
+
+            int removeCount = CountRemovableIndent(text, spaces);
+            if (removeCount <= 0) continue;
+
+            doc.DeleteRange(new MarkdownPosition(line, 0), new MarkdownPosition(line, removeCount));
+            removedByLine[line] = removeCount;
+            changed = true;
+        }
+
+        if (!changed) return false;
+
+        if (HasSelection)
+        {
+            var (s, e) = GetSelection();
+
+            MarkdownPosition shiftedA = ShiftColumnWithPerLineRemoval(s, removedByLine);
+            MarkdownPosition shiftedB = ShiftColumnWithPerLineRemoval(e, removedByLine);
+
+            Anchor = doc.ClampPosition(shiftedA);
+            Caret = doc.ClampPosition(shiftedB);
+            NormalizeCollapsedSelection();
+        }
+        else
+        {
+            int removed = removedByLine.TryGetValue(Caret.Line, out int r) ? r : 0;
+            Caret = doc.ClampPosition(new MarkdownPosition(Caret.Line, Math.Max(0, Caret.Column - removed)));
+        }
+
+        _preferredColumn = null;
+        return true;
+    }
+
+    private static MarkdownPosition ShiftColumnIfAffected(MarkdownPosition pos, int lineStart, int lineEnd, int delta)
+    {
+        if (pos.Line < lineStart || pos.Line > lineEnd)
+            return pos;
+
+        int col = Math.Max(0, pos.Column + delta);
+        return new MarkdownPosition(pos.Line, col);
+    }
+
+    private static MarkdownPosition ShiftColumnWithPerLineRemoval(
+        MarkdownPosition pos,
+        IReadOnlyDictionary<int, int> removedByLine)
+    {
+        if (!removedByLine.TryGetValue(pos.Line, out int removed) || removed <= 0)
+            return pos;
+
+        int col = Math.Max(0, pos.Column - removed);
+        return new MarkdownPosition(pos.Line, col);
+    }
+
+    private static int CountRemovableIndent(string lineText, int maxSpaces)
+    {
+        if (string.IsNullOrEmpty(lineText)) return 0;
+
+        // Prefer one tab as one indentation step
+        if (lineText[0] == '\t')
+            return 1;
+
+        int count = 0;
+        while (count < lineText.Length && count < maxSpaces && lineText[count] == ' ')
+            count++;
+
+        return count;
+    }
+
+    private bool TryGetAffectedLineRange(DocumentModel doc, out int startLine, out int endLine)
+    {
+        if (doc.LineCount <= 0)
+        {
+            startLine = endLine = 0;
+            return false;
+        }
+
+        if (!HasSelection)
+        {
+            startLine = Math.Clamp(Caret.Line, 0, doc.LineCount - 1);
+            endLine = startLine;
+            return true;
+        }
+
+        var (s, e) = GetSelection();
+        startLine = s.Line;
+        endLine = e.Line;
+
+        // If selection ends exactly at col 0, do not include that final line
+        if (e.Column == 0 && endLine > startLine)
+            endLine--;
+
+        startLine = Math.Clamp(startLine, 0, doc.LineCount - 1);
+        endLine = Math.Clamp(endLine, 0, doc.LineCount - 1);
+
+        return endLine >= startLine;
     }
 
     private void SetCaretVertical(MarkdownPosition position, bool shift, DocumentModel doc)
