@@ -11,7 +11,8 @@ public enum InlineStyle
     None = 0,
     Bold = 1,
     Italic = 2,
-    Strike = 4
+    Strike = 4,
+    Code = 8
 }
 
 public readonly record struct InlineRun(string Text, InlineStyle Style);
@@ -80,6 +81,39 @@ public static class InlineMarkdown
                 continue;
             }
 
+            // Inline code: `code` oder ```code``` (1 oder >=3, gleicher Delimiter zum Schließen)
+            if (TryReadCodeSpan(input, i, out int codeMarkerLen, out int closeMarkerPos))
+            {
+                FlushRun();
+
+                // opening marker hidden
+                for (int k = 1; k <= codeMarkerLen && (i + k) <= srcN; k++)
+                    sourceToVisual[i + k] = outPos;
+
+                int innerStart = i + codeMarkerLen;
+                int innerEnd = closeMarkerPos;
+
+                if (innerEnd > innerStart)
+                {
+                    string codeText = input.Substring(innerStart, innerEnd - innerStart);
+                    runs.Add(new InlineRun(codeText, style | InlineStyle.Code));
+
+                    for (int s = innerStart; s < innerEnd; s++)
+                    {
+                        outPos++;
+                        visualToSource.Add(s + 1);
+                        sourceToVisual[s + 1] = outPos;
+                    }
+                }
+
+                // closing marker hidden
+                for (int k = 1; k <= codeMarkerLen && (closeMarkerPos + k) <= srcN; k++)
+                    sourceToVisual[closeMarkerPos + k] = outPos;
+
+                i = closeMarkerPos + codeMarkerLen;
+                continue;
+            }
+
             // Marker handling (open/close)
             if (TryReadMarker(input, i, style, out int markerLen, out InlineStyle toggleStyle))
             {
@@ -120,6 +154,7 @@ public static class InlineMarkdown
         if ((style & InlineStyle.Italic) != 0) fs |= FontStyle.Italic;
         if ((style & InlineStyle.Strike) != 0) fs |= FontStyle.Strikeout;
 
+        // InlineStyle.Code steuert Rendering (Mono + Hintergrund), kein FontStyle-Flag
         return new Font(
             baseFont.FontFamily,
             baseFont.Size,
@@ -136,6 +171,53 @@ public static class InlineMarkdown
 
     private static bool IsEscapable(char c)
         => c is '*' or '_' or '~' or '\\' or '`';
+
+    private static bool TryReadCodeSpan(string s, int i, out int markerLen, out int closeMarkerPos)
+    {
+        markerLen = 0;
+        closeMarkerPos = -1;
+
+        if (i < 0 || i >= s.Length || s[i] != '`')
+            return false;
+
+        if (IsEscapedAt(s, i))
+            return false;
+
+        int run = CountRun(s, i, '`');
+
+        // Nur 1 oder >=3 zulassen
+        if (!(run == 1 || run >= 3))
+            return false;
+
+        int scanStart = i + run;
+
+        for (int p = scanStart; p < s.Length; p++)
+        {
+            if (s[p] != '`' || IsEscapedAt(s, p))
+                continue;
+
+            int closeRun = CountRun(s, p, '`');
+            if (closeRun == run)
+            {
+                markerLen = run;
+                closeMarkerPos = p;
+                return true;
+            }
+
+            p += Math.Max(0, closeRun - 1);
+        }
+
+        return false;
+    }
+
+    private static bool IsEscapedAt(string s, int index)
+    {
+        int backslashes = 0;
+        for (int i = index - 1; i >= 0 && s[i] == '\\'; i--)
+            backslashes++;
+
+        return (backslashes & 1) == 1;
+    }
 
     private static bool TryReadMarker(
         string s,
@@ -157,11 +239,7 @@ public static class InlineMarkdown
 
         if (ch is '*' or '_')
         {
-            // Closing preference first (prevents trailing marker leftovers)
-            // candidates by run length:
-            // run>=3: BI, B, I
-            // run==2: B, I
-            // run==1: I
+            // Closing preference first
             if (run >= 3)
             {
                 if (HasStyle(currentStyle, InlineStyle.Bold | InlineStyle.Italic))
@@ -185,7 +263,6 @@ public static class InlineMarkdown
                     return true;
                 }
 
-                // opening: only consume full run-token (3)
                 if (HasMatchingRunAhead(s, scanStart, ch, 3))
                 {
                     markerLen = 3;
@@ -205,7 +282,6 @@ public static class InlineMarkdown
                     return true;
                 }
 
-                // optional: allow closing italic with one of two markers
                 if (HasStyle(currentStyle, InlineStyle.Italic))
                 {
                     markerLen = 1;
@@ -213,7 +289,6 @@ public static class InlineMarkdown
                     return true;
                 }
 
-                // opening: consume exactly 2
                 if (HasMatchingRunAhead(s, scanStart, ch, 2))
                 {
                     markerLen = 2;
@@ -252,7 +327,6 @@ public static class InlineMarkdown
                 return true;
             }
 
-            // opening: consume exactly 2
             if (HasMatchingRunAhead(s, scanStart, '~', 2))
             {
                 markerLen = 2;
@@ -260,7 +334,6 @@ public static class InlineMarkdown
                 return true;
             }
 
-            // optional single-tilde support (if you want ~text~)
             if (HasStyle(currentStyle, InlineStyle.Strike))
             {
                 markerLen = 1;

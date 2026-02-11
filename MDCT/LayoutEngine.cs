@@ -25,7 +25,7 @@ public sealed class LayoutLine
     public required int HeadingLevel { get; init; }
     public required LineFontRole FontRole { get; init; }
 
-    // NEU: bereits inline-parste Runs (ohne Markdown-Marker)
+    // Bereits inline-geparste Runs (ohne Markdown-Marker)
     public required IReadOnlyList<InlineRun> InlineRuns { get; init; }
 }
 
@@ -35,6 +35,8 @@ public sealed class TableLayout
 {
     private readonly Rectangle[,] _cellRects;
     private readonly string[,] _cellTexts;
+    private readonly IReadOnlyList<InlineRun>[,] _cellRuns;
+    private readonly TableAlignment[] _colAlignments;
 
     public int StartLine { get; }
     public int EndLine { get; }
@@ -51,7 +53,9 @@ public sealed class TableLayout
         Rectangle bounds,
         TableBlock block,
         Rectangle[,] cellRects,
-        string[,] cellTexts)
+        string[,] cellTexts,
+        IReadOnlyList<InlineRun>[,] cellRuns,
+        TableAlignment[] colAlignments)
     {
         StartLine = startLine;
         EndLine = endLine;
@@ -61,10 +65,16 @@ public sealed class TableLayout
         Block = block;
         _cellRects = cellRects;
         _cellTexts = cellTexts;
+        _cellRuns = cellRuns;
+        _colAlignments = colAlignments;
     }
 
     public Rectangle GetCellRect(int row, int col) => _cellRects[row, col];
     public string GetCellText(int row, int col) => _cellTexts[row, col];
+    public IReadOnlyList<InlineRun> GetCellRuns(int row, int col) => _cellRuns[row, col];
+
+    public TableAlignment GetColumnAlignment(int col)
+        => (col >= 0 && col < _colAlignments.Length) ? _colAlignments[col] : default;
 
     public IEnumerable<(int Row, int Col, Rectangle Rect, string Text)> EnumerateCells()
     {
@@ -92,8 +102,334 @@ public sealed class LayoutEngine
     private static readonly TextFormatFlags MeasureFlags =
         TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine;
 
+    private readonly record struct CodeFenceSpan(
+        int StartLine,
+        int EndLine,
+        int StartMarkerCol,
+        int StartMarkerLen,
+        int EndMarkerCol,
+        int EndMarkerLen,
+        char FenceChar);
+
+    private readonly record struct FenceMarker(int Col, int Len, char Char);
+
+
+    private const int TableCodeChipPadX = 4;
+
+    private int MeasureInlineRunsWidthForTableLayout(IReadOnlyList<InlineRun> runs, Font baseFont)
+    {
+        if (runs.Count == 0) return 0;
+
+        int width = 0;
+        var cache = new Dictionary<int, Font>();
+
+        try
+        {
+            foreach (var run in runs)
+            {
+                if (string.IsNullOrEmpty(run.Text)) continue;
+
+                bool isCode = (run.Style & InlineStyle.Code) != 0;
+                InlineStyle normalized = run.Style & ~InlineStyle.Code;
+
+                int key = ((int)normalized & 0xFF)
+                          | (isCode ? 0x100 : 0)
+                          | (((int)baseFont.Style & 0xFF) << 9);
+
+                if (!cache.TryGetValue(key, out var f))
+                {
+                    Font seed = isCode ? _monoFont : baseFont;
+                    f = InlineMarkdown.CreateStyledFont(seed, normalized);
+                    cache[key] = f;
+                }
+
+                int w = MeasureWidth(run.Text, f);
+                if (isCode) w += TableCodeChipPadX * 2;
+
+                width += w;
+            }
+        }
+        finally
+        {
+            foreach (var f in cache.Values)
+                f.Dispose();
+        }
+
+        return width;
+    }
+
+
+
+
+    // ------------------------------------------------------------
+    // Fence-Erkennung:
+    // - Backtick: 1 oder >=3
+    // - Tilde: >=3
+    // ------------------------------------------------------------
+
+    private static bool IsValidFenceOpenerLen(char ch, int len)
+    {
+        if (ch == '`')
+            return len == 1 || len >= 3;
+
+        if (ch == '~')
+            return len >= 3;
+
+        return false;
+    }
+
+    private static bool IsValidFenceCloserLen(char ch, int openLen, int closeLen)
+    {
+        if (ch == '`')
+        {
+            // User-Wunsch: nur 1 oder >=3 gelten als Fence-Länge
+            if (!(closeLen == 1 || closeLen >= 3))
+                return false;
+
+            // close muss mindestens so lang wie open sein
+            return closeLen >= openLen;
+        }
+
+        if (ch == '~')
+        {
+            // ~ nur >=3
+            if (closeLen < 3)
+                return false;
+
+            return closeLen >= openLen;
+        }
+
+        return false;
+    }
+
+    private static bool IsEscaped(string s, int index)
+    {
+        int backslashes = 0;
+        for (int i = index - 1; i >= 0 && s[i] == '\\'; i--)
+            backslashes++;
+
+        return (backslashes & 1) == 1;
+    }
+
+    private static bool IsWhitespaceTail(string line, int startIndex)
+    {
+        for (int i = startIndex; i < line.Length; i++)
+        {
+            if (!char.IsWhiteSpace(line[i]))
+                return false;
+        }
+
+        return true;
+    }
+
+    private static bool TryFindFenceOpener(string line, out FenceMarker marker)
+    {
+        marker = default;
+
+        if (string.IsNullOrEmpty(line))
+            return false;
+
+        // Öffner nur am ersten nicht-whitespace Zeichen
+        int i = 0;
+        while (i < line.Length && char.IsWhiteSpace(line[i])) i++;
+        if (i >= line.Length) return false;
+
+        char ch = line[i];
+        if (ch != '`' && ch != '~') return false;
+        if (IsEscaped(line, i)) return false;
+
+        int j = i;
+        while (j < line.Length && line[j] == ch) j++;
+
+        int len = j - i;
+        if (!IsValidFenceOpenerLen(ch, len))
+            return false;
+
+        marker = new FenceMarker(i, len, ch);
+        return true;
+    }
+
+    private static bool TryFindFenceCloser(
+        string line,
+        char expectedChar,
+        int openLen,
+        int fromIndex,
+        out FenceMarker close)
+    {
+        close = default;
+
+        if (string.IsNullOrEmpty(line))
+            return false;
+
+        int from = Math.Clamp(fromIndex, 0, line.Length);
+
+        for (int i = from; i < line.Length; i++)
+        {
+            if (line[i] != expectedChar || IsEscaped(line, i))
+                continue;
+
+            int j = i;
+            while (j < line.Length && line[j] == expectedChar) j++;
+
+            int len = j - i;
+            if (!IsValidFenceCloserLen(expectedChar, openLen, len))
+            {
+                i = j - 1;
+                continue;
+            }
+
+            // Close-Regel: nach Marker nur Whitespace
+            if (IsWhitespaceTail(line, j))
+            {
+                close = new FenceMarker(i, len, expectedChar);
+                return true;
+            }
+
+            i = j - 1;
+        }
+
+        return false;
+    }
+
+    private static List<CodeFenceSpan> BuildCodeFenceSpans(DocumentModel doc)
+    {
+        var spans = new List<CodeFenceSpan>();
+        int n = doc.LineCount;
+        int line = 0;
+
+        while (line < n)
+        {
+            string s = doc.GetLine(line);
+
+            if (!TryFindFenceOpener(s, out var open))
+            {
+                line++;
+                continue;
+            }
+
+            int endLine = n - 1;
+            int endCol = -1;
+            int endLen = 0;
+            bool closed = false;
+
+            // Same-line close: `text` / ```text```
+            if (TryFindFenceCloser(s, open.Char, open.Len, open.Col + open.Len, out var sameClose))
+            {
+                endLine = line;
+                endCol = sameClose.Col;
+                endLen = sameClose.Len;
+                closed = true;
+            }
+            else
+            {
+                // Multi-line close
+                for (int j = line + 1; j < n; j++)
+                {
+                    if (TryFindFenceCloser(doc.GetLine(j), open.Char, open.Len, 0, out var close))
+                    {
+                        endLine = j;
+                        endCol = close.Col;
+                        endLen = close.Len;
+                        closed = true;
+                        break;
+                    }
+                }
+            }
+
+            spans.Add(new CodeFenceSpan(
+                StartLine: line,
+                EndLine: endLine,
+                StartMarkerCol: open.Col,
+                StartMarkerLen: open.Len,
+                EndMarkerCol: endCol,
+                EndMarkerLen: endLen,
+                FenceChar: open.Char));
+
+            line = closed ? endLine + 1 : n; // unclosed -> bis EOF
+        }
+
+        return spans;
+    }
+
+    private static VisualProjection BuildProjectionHidingRanges(
+        string source,
+        IReadOnlyList<(int Start, int Length)> ranges)
+    {
+        source ??= string.Empty;
+        int n = source.Length;
+
+        if (n == 0 || ranges.Count == 0)
+            return CreateIdentityProjection(source);
+
+        var normalized = ranges
+            .Where(r => r.Length > 0)
+            .Select(r =>
+            {
+                int s = Math.Clamp(r.Start, 0, n);
+                int e = Math.Clamp(r.Start + r.Length, 0, n);
+                return (Start: s, End: e);
+            })
+            .Where(r => r.End > r.Start)
+            .OrderBy(r => r.Start)
+            .ToList();
+
+        if (normalized.Count == 0)
+            return CreateIdentityProjection(source);
+
+        bool[] hide = new bool[n];
+        foreach (var r in normalized)
+        {
+            for (int k = r.Start; k < r.End; k++)
+                hide[k] = true;
+        }
+
+        var sb = new System.Text.StringBuilder(n);
+        int[] s2v = new int[n + 1];
+        var v2s = new List<int>(n + 1) { 0 };
+
+        int v = 0;
+        for (int s = 0; s < n; s++)
+        {
+            s2v[s] = v;
+
+            if (hide[s])
+                continue;
+
+            sb.Append(source[s]);
+            v++;
+            v2s.Add(s + 1);
+        }
+
+        s2v[n] = v;
+
+        if (v2s.Count == 0)
+            v2s.Add(n);
+        else
+            v2s[v2s.Count - 1] = n;
+
+        return VisualProjection.Create(sb.ToString(), v2s.ToArray(), s2v);
+    }
+
+    private static VisualProjection CreateIdentityProjection(string source)
+    {
+        source ??= string.Empty;
+        int n = source.Length;
+
+        int[] v2s = new int[n + 1];
+        int[] s2v = new int[n + 1];
+
+        for (int i = 0; i <= n; i++)
+        {
+            v2s[i] = i;
+            s2v[i] = i;
+        }
+
+        return VisualProjection.Create(source, v2s, s2v);
+    }
+
     /// <summary>
     /// forceRawTableStarts: table start-lines that should be rendered as raw source (not as grid).
+    /// forceRawCodeFenceStarts: fence start-lines that should be rendered raw (show full source including markers).
     /// </summary>
     public void Rebuild(
         DocumentModel doc,
@@ -101,7 +437,8 @@ public sealed class LayoutEngine
         Font baseFont,
         Font boldFont,
         Font monoFont,
-        IReadOnlySet<int>? forceRawTableStarts = null)
+        IReadOnlySet<int>? forceRawTableStarts = null,
+        IReadOnlySet<int>? forceRawCodeFenceStarts = null)
     {
         _sourceLineCount = doc.LineCount;
 
@@ -122,7 +459,7 @@ public sealed class LayoutEngine
 
         var semantics = BuildSemantics(doc);
 
-        // Only non-RAW tables are rendered as grid.
+        // Nur nicht-RAW Tables als Grid rendern
         var tableStarts = new Dictionary<int, TableBlock>();
         foreach (var t in doc.Blocks.OfType<TableBlock>())
         {
@@ -135,13 +472,49 @@ public sealed class LayoutEngine
                 _tableSourceLines.Add(i);
         }
 
+        // Eigene Fence-Spans
+        var fenceSpans = BuildCodeFenceSpans(doc);
+        int[] fenceSpanByLine = Enumerable.Repeat(-1, doc.LineCount).ToArray();
+
+        // Parser-CodeFence neutralisieren
+        for (int i = 0; i < doc.LineCount; i++)
+        {
+            if (semantics[i].Kind == MarkdownBlockKind.CodeFence)
+            {
+                semantics[i].Kind = string.IsNullOrWhiteSpace(doc.GetLine(i))
+                    ? MarkdownBlockKind.Blank
+                    : MarkdownBlockKind.Paragraph;
+                semantics[i].HeadingLevel = 0;
+                semantics[i].IsCodeFenceStart = false;
+                semantics[i].IsCodeFenceEnd = false;
+            }
+        }
+
+        // Eigene Spans anwenden
+        for (int si = 0; si < fenceSpans.Count; si++)
+        {
+            var sp = fenceSpans[si];
+            for (int i = sp.StartLine; i <= sp.EndLine && i < doc.LineCount; i++)
+            {
+                fenceSpanByLine[i] = si;
+                semantics[i].Kind = MarkdownBlockKind.CodeFence;
+                semantics[i].HeadingLevel = 0;
+            }
+
+            if (sp.StartLine >= 0 && sp.StartLine < doc.LineCount)
+                semantics[sp.StartLine].IsCodeFenceStart = true;
+
+            if (sp.EndLine >= 0 && sp.EndLine < doc.LineCount)
+                semantics[sp.EndLine].IsCodeFenceEnd = true;
+        }
+
         int y = 6;
         int maxWidth = Math.Max(1, viewport.Width);
 
         int lineIdx = 0;
         while (lineIdx < doc.LineCount)
         {
-            // Render table as grid.
+            // Table als Grid rendern
             if (tableStarts.TryGetValue(lineIdx, out var tb))
             {
                 var tableLayout = BuildTableLayout(tb, y);
@@ -153,7 +526,7 @@ public sealed class LayoutEngine
                 continue;
             }
 
-            // Skip source lines that belong to grid tables.
+            // Source-Zeilen von Grid-Tables überspringen
             if (_tableSourceLines.Contains(lineIdx))
             {
                 lineIdx++;
@@ -163,7 +536,7 @@ public sealed class LayoutEngine
             string source = doc.GetLine(lineIdx);
             var sem = semantics[lineIdx];
 
-            // If parser says "Table" but this table is in raw-mode, draw as plain text.
+            // Parser sagt Table, aber hier raw -> als normaler Text rendern
             if (sem.Kind == MarkdownBlockKind.Table)
             {
                 sem.Kind = string.IsNullOrWhiteSpace(source)
@@ -177,78 +550,118 @@ public sealed class LayoutEngine
             LineFontRole role = ResolveFontRole(sem.Kind);
             Font measureFont = ResolveLineMeasureFont(sem.Kind, sem.HeadingLevel, role, out bool disposeMeasureFont);
 
-            int left = sem.Kind switch
+            try
             {
-                MarkdownBlockKind.Quote => 24,
-                MarkdownBlockKind.List => 24,
-                MarkdownBlockKind.CodeFence => 16,
-                _ => 8
-            };
-
-            VisualProjection proj;
-            IReadOnlyList<InlineRun> runs;
-
-            if (isHorizontalRule)
-            {
-                // hide complete source
-                proj = VisualProjection.HidePrefix(source, source.Length);
-                runs = Array.Empty<InlineRun>();
-            }
-            else
-            {
-                // 1) block-prefix projection (quote/list/heading marker)
-                var prefixProj = ProjectionFactory.Build(sem.Kind, source);
-
-                // 2) inline projection (bold/italic/strike marker)
-                if (SupportsInlineFormatting(sem.Kind))
+                int left = sem.Kind switch
                 {
-                    InlineParseResult inline = InlineMarkdown.Parse(prefixProj.DisplayText);
-                    proj = ComposeProjection(prefixProj, inline);
-                    runs = inline.Runs;
+                    MarkdownBlockKind.Quote => 24,
+                    MarkdownBlockKind.List => 24,
+                    MarkdownBlockKind.CodeFence => 16,
+                    _ => 8
+                };
+
+                VisualProjection proj;
+                IReadOnlyList<InlineRun> runs;
+
+                if (isHorizontalRule)
+                {
+                    proj = VisualProjection.HidePrefix(source, source.Length);
+                    runs = Array.Empty<InlineRun>();
                 }
-                else
+                else if (sem.Kind == MarkdownBlockKind.CodeFence)
                 {
-                    proj = prefixProj;
+                    int spanIdx = fenceSpanByLine[lineIdx];
+                    bool hasSpan = spanIdx >= 0;
+                    bool rawFence = false;
+
+                    if (hasSpan)
+                    {
+                        var span = fenceSpans[spanIdx];
+                        rawFence = forceRawCodeFenceStarts?.Contains(span.StartLine) == true;
+                    }
+
+                    if (!hasSpan || rawFence)
+                    {
+                        // Raw-Modus: komplette Source inkl. Marker
+                        proj = CreateIdentityProjection(source);
+                    }
+                    else
+                    {
+                        var span = fenceSpans[spanIdx];
+                        var hideRanges = new List<(int Start, int Length)>(2);
+
+                        // Nur Marker ausblenden, restlichen Text sichtbar lassen
+                        if (lineIdx == span.StartLine && span.StartMarkerCol >= 0 && span.StartMarkerLen > 0)
+                            hideRanges.Add((span.StartMarkerCol, span.StartMarkerLen));
+
+                        if (lineIdx == span.EndLine && span.EndMarkerCol >= 0 && span.EndMarkerLen > 0)
+                            hideRanges.Add((span.EndMarkerCol, span.EndMarkerLen));
+
+                        proj = hideRanges.Count == 0
+                            ? CreateIdentityProjection(source)
+                            : BuildProjectionHidingRanges(source, hideRanges);
+                    }
+
                     runs = proj.DisplayText.Length == 0
                         ? Array.Empty<InlineRun>()
                         : new[] { new InlineRun(proj.DisplayText, InlineStyle.None) };
                 }
+                else
+                {
+                    // 1) Block-Prefix-Projektion
+                    var prefixProj = ProjectionFactory.Build(sem.Kind, source);
+
+                    // 2) Inline-Projektion
+                    if (SupportsInlineFormatting(sem.Kind))
+                    {
+                        InlineParseResult inline = InlineMarkdown.Parse(prefixProj.DisplayText);
+                        proj = ComposeProjection(prefixProj, inline);
+                        runs = inline.Runs;
+                    }
+                    else
+                    {
+                        proj = prefixProj;
+                        runs = proj.DisplayText.Length == 0
+                            ? Array.Empty<InlineRun>()
+                            : new[] { new InlineRun(proj.DisplayText, InlineStyle.None) };
+                    }
+                }
+
+                int lineHeight = MeasureHeight(measureFont) + 4;
+                if (sem.Kind == MarkdownBlockKind.Heading)
+                    lineHeight += (sem.HeadingLevel <= 2 ? 4 : 2);
+                else if (isHorizontalRule)
+                    lineHeight = Math.Max(lineHeight, 14);
+
+                int textWidth = isHorizontalRule
+                    ? Math.Max(1, viewport.Width - left - 12)
+                    : Math.Max(1, MeasureInlineRunsWidth(runs, measureFont));
+
+                var line = new LayoutLine
+                {
+                    SourceLine = lineIdx,
+                    SourceText = source,
+                    Projection = proj,
+                    Bounds = new Rectangle(left, y, Math.Max(1, textWidth), lineHeight),
+                    TextX = left,
+                    TextWidth = textWidth,
+                    Kind = sem.Kind,
+                    HeadingLevel = sem.HeadingLevel,
+                    FontRole = role,
+                    InlineRuns = runs
+                };
+
+                _lines.Add(line);
+                _lineBySource[lineIdx] = line;
+
+                y += lineHeight;
+                maxWidth = Math.Max(maxWidth, left + textWidth + 24);
             }
-
-            string display = proj.DisplayText;
-
-            int lineHeight = MeasureHeight(measureFont) + 4;
-            if (sem.Kind == MarkdownBlockKind.Heading)
-                lineHeight += (sem.HeadingLevel <= 2 ? 4 : 2);
-            else if (isHorizontalRule)
-                lineHeight = Math.Max(lineHeight, 14);
-
-            int textWidth = isHorizontalRule
-                ? Math.Max(1, viewport.Width - left - 12)
-                : Math.Max(1, MeasureInlineRunsWidth(runs, measureFont));
-
-            var line = new LayoutLine
+            finally
             {
-                SourceLine = lineIdx,
-                SourceText = source,
-                Projection = proj,
-                Bounds = new Rectangle(left, y, Math.Max(1, textWidth), lineHeight),
-                TextX = left,
-                TextWidth = textWidth,
-                Kind = sem.Kind,
-                HeadingLevel = sem.HeadingLevel,
-                FontRole = role,
-                InlineRuns = runs
-            };
-
-            _lines.Add(line);
-            _lineBySource[lineIdx] = line;
-
-            y += lineHeight;
-            maxWidth = Math.Max(maxWidth, left + textWidth + 24);
-
-            if (disposeMeasureFont)
-                measureFont.Dispose();
+                if (disposeMeasureFont)
+                    measureFont.Dispose();
+            }
 
             lineIdx++;
         }
@@ -338,7 +751,6 @@ public sealed class LayoutEngine
                 }
             }
 
-            // Inside table but on border/line -> choose nearest cell.
             int rr = Math.Clamp((contentPoint.Y - t.Bounds.Y) / Math.Max(1, t.Bounds.Height / Math.Max(1, t.Rows)), 0, t.Rows - 1);
             int cc = Math.Clamp((contentPoint.X - t.Bounds.X) / Math.Max(1, t.Bounds.Width / Math.Max(1, t.Cols)), 0, t.Cols - 1);
             Rectangle fallback = t.GetCellRect(rr, cc);
@@ -403,14 +815,39 @@ public sealed class LayoutEngine
         var colWidths = new int[cols];
         var rowHeights = new int[rows];
 
+        var rects = new Rectangle[rows, cols];
+        var texts = new string[rows, cols];
+        var runs = new IReadOnlyList<InlineRun>[rows, cols];
+
+        var alignments = new TableAlignment[cols];
+        for (int c = 0; c < cols; c++)
+        {
+            alignments[c] = (block.Alignments is not null && c < block.Alignments.Count)
+                ? block.Alignments[c]
+                : default;
+        }
+
         for (int c = 0; c < cols; c++)
         {
             int w = 30;
+
             for (int r = 0; r < rows; r++)
             {
-                string txt = model.Rows[r][c];
-                w = Math.Max(w, MeasureWidth(txt, _baseFont) + cellPadX * 2);
+                string raw = model.Rows[r][c] ?? string.Empty;
+                InlineParseResult parsed = InlineMarkdown.Parse(raw);
+
+                texts[r, c] = parsed.Text;
+                runs[r, c] = parsed.Runs;
+
+                Font measureFont = (r == 0) ? _boldFont : _baseFont;
+
+                int contentW = parsed.Runs.Count > 0
+                    ? MeasureInlineRunsWidthForTableLayout(parsed.Runs, measureFont)
+                    : MeasureWidth(parsed.Text, measureFont);
+
+                w = Math.Max(w, contentW + cellPadX * 2);
             }
+
             colWidths[c] = w;
         }
 
@@ -422,8 +859,6 @@ public sealed class LayoutEngine
         int totalH = rowHeights.Sum();
 
         var bounds = new Rectangle(left, topY, totalW, totalH);
-        var rects = new Rectangle[rows, cols];
-        var texts = new string[rows, cols];
 
         int y = topY;
         for (int r = 0; r < rows; r++)
@@ -432,7 +867,6 @@ public sealed class LayoutEngine
             for (int c = 0; c < cols; c++)
             {
                 rects[r, c] = new Rectangle(x, y, colWidths[c], rowHeights[r]);
-                texts[r, c] = model.Rows[r][c] ?? string.Empty;
                 x += colWidths[c];
             }
             y += rowHeights[r];
@@ -446,7 +880,9 @@ public sealed class LayoutEngine
             bounds,
             block,
             rects,
-            texts);
+            texts,
+            runs,
+            alignments);
     }
 
     private static bool SupportsInlineFormatting(MarkdownBlockKind kind) => kind switch
@@ -631,16 +1067,17 @@ public sealed class LayoutEngine
         int n = doc.LineCount;
         var sem = new LineSemantic[n];
 
-        // Default: blank or paragraph
+        // Default
         for (int i = 0; i < n; i++)
         {
             sem[i].Kind = string.IsNullOrWhiteSpace(doc.GetLine(i))
                 ? MarkdownBlockKind.Blank
                 : MarkdownBlockKind.Paragraph;
             sem[i].HeadingLevel = 0;
+            sem[i].IsCodeFenceStart = false;
+            sem[i].IsCodeFenceEnd = false;
         }
 
-        // Override by parsed blocks
         foreach (var b in doc.Blocks)
         {
             switch (b)
@@ -683,6 +1120,12 @@ public sealed class LayoutEngine
                         sem[i].Kind = MarkdownBlockKind.CodeFence;
                         sem[i].HeadingLevel = 0;
                     }
+
+                    if (c.StartLine >= 0 && c.StartLine < n)
+                        sem[c.StartLine].IsCodeFenceStart = true;
+
+                    if (c.EndLine >= 0 && c.EndLine < n)
+                        sem[c.EndLine].IsCodeFenceEnd = true;
                     break;
 
                 case TableBlock t:
@@ -694,7 +1137,6 @@ public sealed class LayoutEngine
                     break;
 
                 default:
-                    // Catch-all for future block types (e.g. HorizontalRuleBlock)
                     for (int i = Math.Max(0, b.StartLine); i <= Math.Min(n - 1, b.EndLine); i++)
                     {
                         sem[i].Kind = b.Kind;
@@ -712,5 +1154,7 @@ public sealed class LayoutEngine
     {
         public MarkdownBlockKind Kind;
         public int HeadingLevel;
+        public bool IsCodeFenceStart;
+        public bool IsCodeFenceEnd;
     }
 }

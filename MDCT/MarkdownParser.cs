@@ -119,17 +119,13 @@ public static class MarkdownParser
         return "-";
     }
 
-    private static bool IsSpecialStart(IReadOnlyList<string> lines, int i)
+    private static bool HasFenceCloseAhead(IReadOnlyList<string> lines, int startIndex, char fenceChar, int minFenceLen)
     {
-        string line = lines[i];
-
-        if (string.IsNullOrWhiteSpace(line)) return true;
-        if (FenceStartRegex.IsMatch(line)) return true;
-        if (HeadingRegex.IsMatch(line)) return true;
-        if (IsHorizontalRule(line)) return true;
-        if (QuoteRegex.IsMatch(line)) return true;
-        if (IsListLine(line)) return true;
-        if (IsPotentialTableStart(lines, i)) return true;
+        for (int j = startIndex; j < lines.Count; j++)
+        {
+            if (IsFenceClose(lines[j], fenceChar, minFenceLen))
+                return true;
+        }
 
         return false;
     }
@@ -143,33 +139,49 @@ public static class MarkdownParser
         var m = FenceStartRegex.Match(lines[i]);
         if (!m.Success) return false;
 
-        string fenceToken = m.Groups[1].Value; // ``` oder ~~~
+        string fenceToken = m.Groups[1].Value;   // ``` oder ~~~ (auch länger)
         string language = m.Groups[2].Value.Trim();
 
         char fenceChar = fenceToken[0];
         int minFenceLen = fenceToken.Length;
 
         int start = i;
-        int j = i + 1;
+        int close = -1;
 
-        while (j < lines.Count)
+        for (int j = i + 1; j < lines.Count; j++)
         {
             if (IsFenceClose(lines[j], fenceChar, minFenceLen))
+            {
+                close = j;
                 break;
-            j++;
+            }
         }
 
-        int end = (j < lines.Count) ? j : lines.Count - 1;
-        block = new CodeFenceBlock(start, end, fenceToken, language);
-        i = end + 1;
+        // Editor-friendly:
+        // Unclosed fence => NICHT als CodeFenceBlock parsen,
+        // damit nicht der Rest des Dokuments "im Codeblock hängt".
+        if (close < 0)
+            return false;
+
+        block = new CodeFenceBlock(start, close, fenceToken, language);
+        i = close + 1;
         return true;
     }
+
 
     private static bool IsFenceClose(string line, char fenceChar, int minFenceLen)
     {
         int i = 0;
-        while (i < line.Length && char.IsWhiteSpace(line[i])) i++;
 
+        // Markdown: bis zu 3 führende Spaces erlauben
+        int leadingSpaces = 0;
+        while (i < line.Length && line[i] == ' ' && leadingSpaces < 3)
+        {
+            i++;
+            leadingSpaces++;
+        }
+
+        // Danach muss direkt die Fence beginnen (kein Text davor)
         int count = 0;
         while (i < line.Length && line[i] == fenceChar)
         {
@@ -179,6 +191,7 @@ public static class MarkdownParser
 
         if (count < minFenceLen) return false;
 
+        // Danach nur noch Whitespace
         while (i < line.Length)
         {
             if (!char.IsWhiteSpace(line[i])) return false;
@@ -187,6 +200,7 @@ public static class MarkdownParser
 
         return true;
     }
+
 
     // ---------- TABLES (strict) ----------
 
@@ -291,6 +305,34 @@ public static class MarkdownParser
         string s = line.Trim();
         return s.StartsWith("|") && s.EndsWith("|");
     }
+
+    private static bool IsSpecialStart(IReadOnlyList<string> lines, int i)
+    {
+        string line = lines[i];
+
+        if (string.IsNullOrWhiteSpace(line)) return true;
+        if (HeadingRegex.IsMatch(line)) return true;
+        if (IsHorizontalRule(line)) return true;
+        if (QuoteRegex.IsMatch(line)) return true;
+        if (IsListLine(line)) return true;
+        if (IsPotentialTableStart(lines, i)) return true;
+
+        // Fence nur dann als "special start", wenn später auch ein passendes Ende existiert.
+        // Sonst bleibt es normaler Paragraph-Text (Editor-UX).
+        var m = FenceStartRegex.Match(line);
+        if (m.Success)
+        {
+            string token = m.Groups[1].Value;
+            char fenceChar = token[0];
+            int minFenceLen = token.Length;
+
+            if (HasFenceCloseAhead(lines, i + 1, fenceChar, minFenceLen))
+                return true;
+        }
+
+        return false;
+    }
+
 
     // Splittet Zellen und unterstützt escaped pipes "\|"
     private static List<string> ParseTableCells(string line)
