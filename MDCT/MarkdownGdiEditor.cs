@@ -394,6 +394,10 @@ public sealed class MarkdownGdiEditor : ScrollableControl
 
     private readonly record struct FenceMarker(int Col, int Len, char Char);
 
+    private static bool IsSupportedFenceLen(char ch, int len)
+        => (ch == '`' || ch == '~') && len >= 3;
+
+
     private static bool IsSupportedFenceLen(int len) => len == 1 || len >= 3;
 
     private static bool IsEscaped(string s, int index)
@@ -421,7 +425,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl
             while (j < line.Length && line[j] == ch) j++;
 
             int len = j - i;
-            if (IsSupportedFenceLen(len))
+            if (IsSupportedFenceLen(ch, len))
             {
                 marker = new FenceMarker(i, len, ch);
                 return true;
@@ -433,12 +437,13 @@ public sealed class MarkdownGdiEditor : ScrollableControl
         return false;
     }
 
+
     private static bool TryFindFenceCloser(
-        string line,
-        char expectedChar,
-        int minOpenLen,
-        int fromIndex,
-        out FenceMarker close)
+     string line,
+     char expectedChar,
+     int minOpenLen,
+     int fromIndex,
+     out FenceMarker close)
     {
         close = default;
         if (string.IsNullOrEmpty(line)) return false;
@@ -454,7 +459,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl
             while (j < line.Length && line[j] == expectedChar) j++;
 
             int len = j - i;
-            if (!IsSupportedFenceLen(len) || len < minOpenLen)
+            if (!IsSupportedFenceLen(expectedChar, len) || len < minOpenLen)
             {
                 i = j - 1;
                 continue;
@@ -481,6 +486,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl
 
         return false;
     }
+
 
     private int? GetContainingCodeFenceStartLine(int sourceLine)
     {
@@ -1785,7 +1791,12 @@ public sealed class MarkdownGdiEditor : ScrollableControl
         Font baseFont = GetRenderFont(line);
 
         if (line.InlineRuns is null || line.InlineRuns.Count == 0)
-            return MeasureWidth(display[..visualCols], baseFont);
+        {
+            int widthSimple = 0;
+            for (int i = 0; i < visualCols; i++)
+                widthSimple += MeasureWidth(display[i].ToString(), baseFont);
+            return widthSimple;
+        }
 
         int remaining = visualCols;
         int width = 0;
@@ -1798,19 +1809,22 @@ public sealed class MarkdownGdiEditor : ScrollableControl
                 if (remaining <= 0) break;
                 if (string.IsNullOrEmpty(run.Text)) continue;
 
-                int take = Math.Min(remaining, run.Text.Length);
+                int runLen = run.Text.Length;
+                int take = Math.Min(remaining, runLen);
                 if (take <= 0) continue;
 
                 bool isCode = (run.Style & InlineStyle.Code) != 0;
                 Font runFont = GetOrCreateInlineFont(cache, baseFont, run.Style, isCode, _monoFont);
 
-                string part = take == run.Text.Length ? run.Text : run.Text[..take];
-                int partW = MeasureWidth(part, runFont);
-
                 if (isCode)
-                    partW += InlineCodePadX * 2;
+                    width += InlineCodePadX;
 
-                width += partW;
+                string part = take == runLen ? run.Text : run.Text[..take];
+                width += MeasureWidth(part, runFont);
+
+                if (isCode && take == runLen)
+                    width += InlineCodePadX;
+
                 remaining -= take;
             }
         }
@@ -1860,7 +1874,8 @@ public sealed class MarkdownGdiEditor : ScrollableControl
         => new(r.X + AutoScrollPosition.X, r.Y + AutoScrollPosition.Y, r.Width, r.Height);
 
     private static bool IsHorizontalRule(MarkdownBlockKind kind)
-        => string.Equals(kind.ToString(), "HorizontalRule", StringComparison.Ordinal);
+        => kind == MarkdownBlockKind.HorizontalRule;
+
 
     // -----------------------------
     // Table grid editing

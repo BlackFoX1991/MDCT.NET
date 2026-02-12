@@ -114,6 +114,7 @@ public sealed class LayoutEngine
     private readonly record struct FenceMarker(int Col, int Len, char Char);
 
     private const int TableCodeChipPadX = 4;
+    private const int InlineCodeChipPadX = 4;
 
     private int MeasureInlineRunsWidthForTableLayout(IReadOnlyList<InlineRun> runs, Font baseFont)
     {
@@ -166,7 +167,7 @@ public sealed class LayoutEngine
     private static bool IsValidFenceOpenerLen(char ch, int len)
     {
         if (ch == '`')
-            return len == 1 || len >= 3;
+            return len >= 3;
 
         if (ch == '~')
             return len >= 3;
@@ -174,11 +175,12 @@ public sealed class LayoutEngine
         return false;
     }
 
+
     private static bool IsValidFenceCloserLen(char ch, int openLen, int closeLen)
     {
         if (ch == '`')
         {
-            if (!(closeLen == 1 || closeLen >= 3))
+            if (closeLen < 3)
                 return false;
 
             return closeLen >= openLen;
@@ -1045,7 +1047,16 @@ public sealed class LayoutEngine
             {
                 if (string.IsNullOrEmpty(run.Text)) continue;
 
+                bool isCode = (run.Style & InlineStyle.Code) != 0;
                 Font f = GetOrCreateRunFont(cache, baseFont, run.Style);
+
+                if (isCode)
+                {
+                    int leftPadEnd = x + InlineCodeChipPadX;
+                    if (localX <= leftPadEnd)
+                        return col;
+                    x = leftPadEnd;
+                }
 
                 for (int i = 0; i < run.Text.Length; i++)
                 {
@@ -1062,6 +1073,14 @@ public sealed class LayoutEngine
                     x = nextX;
                     col++;
                 }
+
+                if (isCode)
+                {
+                    int rightPadEnd = x + InlineCodeChipPadX;
+                    if (localX <= rightPadEnd)
+                        return col;
+                    x = rightPadEnd;
+                }
             }
         }
         finally
@@ -1075,21 +1094,25 @@ public sealed class LayoutEngine
 
     private static int ColumnFromXSimple(string displayText, Font font, int localX)
     {
-        int prevWidth = 0;
-        for (int col = 1; col <= displayText.Length; col++)
+        int x = 0;
+        for (int col = 0; col < displayText.Length; col++)
         {
-            int w = MeasureWidth(displayText[..col], font);
-            if (localX <= w)
+            int cw = MeasureWidth(displayText[col].ToString(), font);
+            int nextX = x + cw;
+
+            if (localX <= nextX)
             {
-                int dl = localX - prevWidth;
-                int dr = w - localX;
-                return dl <= dr ? col - 1 : col;
+                int dl = localX - x;
+                int dr = nextX - localX;
+                return dl <= dr ? col : col + 1;
             }
-            prevWidth = w;
+
+            x = nextX;
         }
 
         return displayText.Length;
     }
+
 
     private static int MeasureInlineRunsWidth(IReadOnlyList<InlineRun> runs, Font baseFont)
     {
@@ -1103,8 +1126,13 @@ public sealed class LayoutEngine
             foreach (var run in runs)
             {
                 if (string.IsNullOrEmpty(run.Text)) continue;
+
+                bool isCode = (run.Style & InlineStyle.Code) != 0;
                 Font f = GetOrCreateRunFont(cache, baseFont, run.Style);
                 width += MeasureWidth(run.Text, f);
+
+                if (isCode)
+                    width += InlineCodeChipPadX * 2;
             }
         }
         finally
@@ -1115,6 +1143,7 @@ public sealed class LayoutEngine
 
         return width;
     }
+
 
     private static Font GetOrCreateRunFont(Dictionary<InlineStyle, Font> cache, Font baseFont, InlineStyle style)
     {

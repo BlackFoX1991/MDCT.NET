@@ -1,4 +1,8 @@
-﻿namespace MarkdownGdi;
+﻿using System;
+using System.Collections.Generic;
+using System.Linq;
+
+namespace MarkdownGdi;
 
 internal sealed class TableModel
 {
@@ -29,6 +33,9 @@ internal sealed class TableModel
 
     public void Normalize()
     {
+        if (Rows.Count == 0)
+            Rows.Add(new List<string>());
+
         int cols = Math.Max(1, ColumnCount);
 
         while (Alignments.Count < cols)

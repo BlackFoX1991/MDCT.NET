@@ -223,15 +223,18 @@ public sealed class DocumentModel
     {
         EnsureAtLeastOneLine();
 
-        // Append-Modus zulassen
+        // Append-Modus: Insert am Ende (Index == Count), nichts entfernen.
+        // Wichtig: startLine darf hier NICHT auf Count-1 geclamped werden.
         if (startLine >= _lines.Count)
         {
             startLine = _lines.Count;
             endLine = startLine - 1;
         }
-
-        startLine = Math.Clamp(startLine, 0, _lines.Count - 1);
-        endLine = Math.Clamp(endLine, startLine - 1, _lines.Count - 1);
+        else
+        {
+            startLine = Math.Clamp(startLine, 0, _lines.Count - 1);
+            endLine = Math.Clamp(endLine, startLine - 1, _lines.Count - 1);
+        }
 
         // Nur entfernen, wenn Bereich gültig ist
         if (endLine >= startLine)
