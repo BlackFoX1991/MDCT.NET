@@ -723,7 +723,7 @@ public sealed class LayoutEngine
 
                 int lineHeight = MeasureHeight(measureFont) + 4;
                 if (sem.Kind == MarkdownBlockKind.Heading)
-                    lineHeight += (sem.HeadingLevel <= 2 ? 4 : 2);
+                    lineHeight += 2;
                 else if (isHorizontalRule && !forceRawThisLine)
                     lineHeight = Math.Max(lineHeight, 14);
 

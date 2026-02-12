@@ -1308,12 +1308,12 @@ public sealed class MarkdownGdiEditor : ScrollableControl
             DrawInlineRuns(g, line, new Point(line.TextX, line.Bounds.Top + 1));
         }
 
-        if (line.Kind == MarkdownBlockKind.Heading && line.HeadingLevel <= 2 && !string.IsNullOrEmpty(display))
+        /*if (line.Kind == MarkdownBlockKind.Heading && line.HeadingLevel <= 2 && !string.IsNullOrEmpty(display))
         {
             int w = Math.Max(1, MeasureVisualPrefix(line, line.Projection.DisplayText.Length));
             using var p = new Pen(Color.Gainsboro, 1f);
             g.DrawLine(p, line.TextX, line.Bounds.Bottom - 1, line.TextX + w, line.Bounds.Bottom - 1);
-        }
+        }*/
     }
 
     private void DrawTable(Graphics g, TableLayout table)
