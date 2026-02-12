@@ -72,6 +72,53 @@ public sealed class MarkdownGdiEditor : ScrollableControl
         LineAlignment = StringAlignment.Near
     };
 
+    private readonly record struct AdmonitionPalette(
+        Color Bar,
+        Color Background,
+        Color Border,
+        Color TitleColor,
+        string Icon);
+
+    private static AdmonitionPalette GetAdmonitionPalette(AdmonitionKind kind) => kind switch
+    {
+        AdmonitionKind.Note => new(
+            Color.FromArgb(41, 128, 185),
+            Color.FromArgb(242, 248, 255),
+            Color.FromArgb(189, 222, 246),
+            Color.FromArgb(26, 83, 121),
+            "ⓘ"),
+        AdmonitionKind.Tip => new(
+            Color.FromArgb(39, 174, 96),
+            Color.FromArgb(240, 252, 245),
+            Color.FromArgb(183, 232, 202),
+            Color.FromArgb(24, 108, 60),
+            "💡"),
+        AdmonitionKind.Important => new(
+            Color.FromArgb(142, 68, 173),
+            Color.FromArgb(248, 242, 252),
+            Color.FromArgb(224, 201, 238),
+            Color.FromArgb(90, 40, 112),
+            "❗"),
+        AdmonitionKind.Warning => new(
+            Color.FromArgb(243, 156, 18),
+            Color.FromArgb(255, 249, 236),
+            Color.FromArgb(245, 216, 164),
+            Color.FromArgb(140, 88, 10),
+            "⚠"),
+        AdmonitionKind.Caution => new(
+            Color.FromArgb(231, 76, 60),
+            Color.FromArgb(255, 242, 240),
+            Color.FromArgb(244, 196, 190),
+            Color.FromArgb(138, 41, 31),
+            "⛔"),
+        _ => new(
+            Color.Silver,
+            Color.White,
+            Color.Gainsboro,
+            Color.Gray,
+            string.Empty)
+    };
+
     public event EventHandler<MarkdownChangedEventArgs>? MarkdownChanged;
 
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Visible)]
@@ -398,7 +445,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl
         => (ch == '`' || ch == '~') && len >= 3;
 
 
-    private static bool IsSupportedFenceLen(int len) => len == 1 || len >= 3;
+    private static bool IsSupportedFenceLen(int len) => len >= 3;
 
     private static bool IsEscaped(string s, int index)
     {
@@ -1030,6 +1077,31 @@ public sealed class MarkdownGdiEditor : ScrollableControl
 
         string display = line.Projection.DisplayText;
 
+        bool isQuote = line.Kind == MarkdownBlockKind.Quote;
+        bool isAdmonition = isQuote && line.IsAdmonition;
+        AdmonitionPalette ad = default;
+
+        if (isAdmonition)
+        {
+            ad = GetAdmonitionPalette(line.QuoteAdmonition);
+
+            int bgLeft = 8;
+            int bgRight = Math.Max(bgLeft + 24, AutoScrollMinSize.Width - 16);
+            int bgWidth = Math.Max(24, bgRight - bgLeft);
+
+            var bgRect = new Rectangle(bgLeft, line.Bounds.Top, bgWidth, line.Bounds.Height);
+
+            using var bgBrush = new SolidBrush(ad.Background);
+            g.FillRectangle(bgBrush, bgRect);
+
+            using var borderPen = new Pen(ad.Border, 1f);
+            if (line.IsQuoteStart)
+                g.DrawLine(borderPen, bgRect.Left, bgRect.Top, bgRect.Right, bgRect.Top);
+
+            if (line.IsQuoteEnd)
+                g.DrawLine(borderPen, bgRect.Left, bgRect.Bottom - 1, bgRect.Right, bgRect.Bottom - 1);
+        }
+
         PendingTableDraftInfo draft = GetPendingTableDraftInfo(line.SourceLine);
         if (draft.IsPending)
         {
@@ -1062,12 +1134,24 @@ public sealed class MarkdownGdiEditor : ScrollableControl
 
         if (line.Kind == MarkdownBlockKind.Quote)
         {
-            using var p = new Pen(_quoteBarColor, 3f);
+            Color barColor = isAdmonition ? ad.Bar : _quoteBarColor;
+            using var p = new Pen(barColor, 3f);
             g.DrawLine(p, 12, line.Bounds.Top + 2, 12, line.Bounds.Bottom - 2);
         }
 
-        if (!string.IsNullOrEmpty(display))
+        bool drawAdmonitionHeader = line.IsAdmonitionMarkerLine && string.IsNullOrEmpty(display);
+        if (drawAdmonitionHeader)
+        {
+            string title = string.IsNullOrWhiteSpace(ad.Icon)
+                ? line.AdmonitionTitle
+                : $"{ad.Icon}  {line.AdmonitionTitle}";
+
+            DrawTextGdiPlus(g, title, _boldFont, new Point(line.TextX, line.Bounds.Top + 1), ad.TitleColor);
+        }
+        else if (!string.IsNullOrEmpty(display))
+        {
             DrawInlineRuns(g, line, new Point(line.TextX, line.Bounds.Top + 1));
+        }
 
         if (line.Kind == MarkdownBlockKind.Heading && line.HeadingLevel <= 2 && !string.IsNullOrEmpty(display))
         {

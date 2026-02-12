@@ -9,7 +9,12 @@ public static class MarkdownParser
 {
     private static readonly Regex HeadingRegex = new(@"^\s*(#{1,6})\s+(.+?)\s*$", RegexOptions.Compiled);
     private static readonly Regex QuoteRegex = new(@"^\s*>\s?.*$", RegexOptions.Compiled);
+    private static readonly Regex QuoteContentRegex = new(@"^\s*>\s?(.*)$", RegexOptions.Compiled);
     private static readonly Regex FenceStartRegex = new(@"^\s*(```+|~~~+)\s*(.*)$", RegexOptions.Compiled);
+
+    // [!NOTE], [!TIP], [!IMPORTANT], [!WARNING], [!CAUTION]
+    private static readonly Regex AdmonitionMarkerRegex =
+        new(@"^\[\!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]\s*$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     // Horizontal Rule: ---  ***  ___  (auch mit Spaces dazwischen)
     // Bis zu 3 führende Spaces wie bei Markdown üblich.
@@ -78,7 +83,16 @@ public static class MarkdownParser
             {
                 int start = i;
                 while (i < lines.Count && QuoteRegex.IsMatch(lines[i])) i++;
-                blocks.Add(new QuoteBlock(start, i - 1));
+                int end = i - 1;
+
+                var (admonition, markerLine, markerText) = DetectQuoteAdmonition(lines, start, end);
+                blocks.Add(new QuoteBlock(
+                    StartLine: start,
+                    EndLine: end,
+                    Admonition: admonition,
+                    AdmonitionMarkerLine: markerLine,
+                    AdmonitionMarkerText: markerText));
+
                 continue;
             }
 
@@ -484,5 +498,63 @@ public static class MarkdownParser
 
         cells.Add(sb.ToString().Trim());
         return cells;
+    }
+
+    // ---------- QUOTE ADMONITIONS ----------
+
+    private static (AdmonitionKind Kind, int MarkerLine, string MarkerText) DetectQuoteAdmonition(
+        IReadOnlyList<string> lines,
+        int start,
+        int end)
+    {
+        for (int lineIndex = start; lineIndex <= end; lineIndex++)
+        {
+            if (!TryGetQuoteContent(lines[lineIndex], out string content))
+                continue;
+
+            if (string.IsNullOrWhiteSpace(content))
+                continue; // leere Quote-Zeilen überspringen
+
+            string trimmed = content.Trim();
+
+            if (TryParseAdmonitionMarker(trimmed, out var kind))
+                return (kind, lineIndex, trimmed);
+
+            // Erste inhaltliche Zeile ist kein Marker => kein Admonition-Block
+            break;
+        }
+
+        return (AdmonitionKind.None, -1, string.Empty);
+    }
+
+    private static bool TryGetQuoteContent(string line, out string content)
+    {
+        content = string.Empty;
+        var m = QuoteContentRegex.Match(line);
+        if (!m.Success) return false;
+
+        content = m.Groups[1].Value;
+        return true;
+    }
+
+    private static bool TryParseAdmonitionMarker(string s, out AdmonitionKind kind)
+    {
+        kind = AdmonitionKind.None;
+
+        var m = AdmonitionMarkerRegex.Match(s);
+        if (!m.Success) return false;
+
+        string token = m.Groups[1].Value.ToUpperInvariant();
+        kind = token switch
+        {
+            "NOTE" => AdmonitionKind.Note,
+            "TIP" => AdmonitionKind.Tip,
+            "IMPORTANT" => AdmonitionKind.Important,
+            "WARNING" => AdmonitionKind.Warning,
+            "CAUTION" => AdmonitionKind.Caution,
+            _ => AdmonitionKind.None
+        };
+
+        return kind != AdmonitionKind.None;
     }
 }

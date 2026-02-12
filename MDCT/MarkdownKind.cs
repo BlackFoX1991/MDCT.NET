@@ -14,6 +14,19 @@ public enum MarkdownBlockKind
     Table
 }
 
+/// <summary>
+/// Erweiterung für Quote-Alerts/Admonitions (z.B. [!NOTE]).
+/// </summary>
+public enum AdmonitionKind
+{
+    None,
+    Note,
+    Tip,
+    Important,
+    Warning,
+    Caution
+}
+
 public enum TableAlignment
 {
     None,
@@ -42,8 +55,39 @@ public sealed record ParagraphBlock(int StartLine, int EndLine)
 public sealed record HeadingBlock(int Line, int Level, string Text)
     : MarkdownBlock(Line, Line, MarkdownBlockKind.Heading);
 
-public sealed record QuoteBlock(int StartLine, int EndLine)
-    : MarkdownBlock(StartLine, EndLine, MarkdownBlockKind.Quote);
+/// <summary>
+/// Quote-Block, optional als Admonition (GitHub-Style):
+/// > [!NOTE]
+/// > Text...
+/// </summary>
+/// <param name="StartLine">Erste Quellzeile des Quote-Blocks.</param>
+/// <param name="EndLine">Letzte Quellzeile des Quote-Blocks.</param>
+/// <param name="Admonition">Art der Admonition; None = normaler Quote-Block.</param>
+/// <param name="AdmonitionMarkerLine">Quellzeile des Markers (z.B. [!NOTE]); -1 wenn keiner.</param>
+/// <param name="AdmonitionMarkerText">Original-Text des Markers ohne führendes '>' (z.B. "[!NOTE]").</param>
+public sealed record QuoteBlock(
+    int StartLine,
+    int EndLine,
+    AdmonitionKind Admonition = AdmonitionKind.None,
+    int AdmonitionMarkerLine = -1,
+    string AdmonitionMarkerText = "")
+    : MarkdownBlock(StartLine, EndLine, MarkdownBlockKind.Quote)
+{
+    public bool IsAdmonition => Admonition != AdmonitionKind.None;
+
+    /// <summary>
+    /// Standard-Titel für die UI-Darstellung.
+    /// </summary>
+    public string AdmonitionTitle => Admonition switch
+    {
+        AdmonitionKind.Note => "Note",
+        AdmonitionKind.Tip => "Tip",
+        AdmonitionKind.Important => "Important",
+        AdmonitionKind.Warning => "Warning",
+        AdmonitionKind.Caution => "Caution",
+        _ => string.Empty
+    };
+}
 
 /// <summary>
 /// Ein einzelner Listeneintrag (inkl. Nested-Informationen).

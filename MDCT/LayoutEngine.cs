@@ -27,6 +27,26 @@ public sealed class LayoutLine
 
     // Bereits inline-geparste Runs (ohne Markdown-Marker)
     public required IReadOnlyList<InlineRun> InlineRuns { get; init; }
+
+    // Quote/Admonition-Metadaten
+    public AdmonitionKind QuoteAdmonition { get; init; } = AdmonitionKind.None;
+    public bool IsAdmonitionMarkerLine { get; init; }
+    public int QuoteStartLine { get; init; } = -1;
+    public int QuoteEndLine { get; init; } = -1;
+
+    public bool IsAdmonition => QuoteAdmonition != AdmonitionKind.None;
+    public bool IsQuoteStart => Kind == MarkdownBlockKind.Quote && QuoteStartLine >= 0 && SourceLine == QuoteStartLine;
+    public bool IsQuoteEnd => Kind == MarkdownBlockKind.Quote && QuoteEndLine >= 0 && SourceLine == QuoteEndLine;
+
+    public string AdmonitionTitle => QuoteAdmonition switch
+    {
+        AdmonitionKind.Note => "Note",
+        AdmonitionKind.Tip => "Tip",
+        AdmonitionKind.Important => "Important",
+        AdmonitionKind.Warning => "Warning",
+        AdmonitionKind.Caution => "Caution",
+        _ => string.Empty
+    };
 }
 
 public readonly record struct TableHit(TableLayout Table, int Row, int Col, Rectangle CellBounds);
@@ -160,7 +180,7 @@ public sealed class LayoutEngine
 
     // ------------------------------------------------------------
     // Fence-Erkennung:
-    // - Backtick: 1 oder >=3
+    // - Backtick: >=3
     // - Tilde: >=3
     // ------------------------------------------------------------
 
@@ -174,7 +194,6 @@ public sealed class LayoutEngine
 
         return false;
     }
-
 
     private static bool IsValidFenceCloserLen(char ch, int openLen, int closeLen)
     {
@@ -549,8 +568,15 @@ public sealed class LayoutEngine
             }
 
             bool isHorizontalRule = IsHorizontalRuleKind(sem.Kind);
+            bool isAdmonitionMarkerLine =
+                sem.Kind == MarkdownBlockKind.Quote &&
+                sem.QuoteAdmonition != AdmonitionKind.None &&
+                sem.IsAdmonitionMarkerLine;
 
             LineFontRole role = ResolveFontRole(sem.Kind);
+            if (isAdmonitionMarkerLine && !forceRawThisLine)
+                role = LineFontRole.Bold;
+
             Font measureFont = ResolveLineMeasureFont(sem.Kind, sem.HeadingLevel, role, out bool disposeMeasureFont);
 
             try
@@ -616,6 +642,13 @@ public sealed class LayoutEngine
                     runs = proj.DisplayText.Length == 0
                         ? Array.Empty<InlineRun>()
                         : new[] { new InlineRun(proj.DisplayText, InlineStyle.None) };
+                }
+                else if (isAdmonitionMarkerLine)
+                {
+                    // Marker-Zeile (z.B. > [!NOTE]) im Rich-Modus nicht als Body-Text anzeigen.
+                    // Der Editor kann an dieser Zeile stattdessen einen visuellen Header rendern.
+                    proj = VisualProjection.HidePrefix(source, source.Length);
+                    runs = Array.Empty<InlineRun>();
                 }
                 else if (sem.Kind == MarkdownBlockKind.List && listItemByLine.TryGetValue(lineIdx, out var li))
                 {
@@ -689,7 +722,12 @@ public sealed class LayoutEngine
                     Kind = sem.Kind,
                     HeadingLevel = sem.HeadingLevel,
                     FontRole = role,
-                    InlineRuns = runs
+                    InlineRuns = runs,
+
+                    QuoteAdmonition = sem.QuoteAdmonition,
+                    IsAdmonitionMarkerLine = sem.IsAdmonitionMarkerLine,
+                    QuoteStartLine = sem.QuoteStartLine,
+                    QuoteEndLine = sem.QuoteEndLine
                 };
 
                 _lines.Add(line);
@@ -1113,7 +1151,6 @@ public sealed class LayoutEngine
         return displayText.Length;
     }
 
-
     private static int MeasureInlineRunsWidth(IReadOnlyList<InlineRun> runs, Font baseFont)
     {
         if (runs.Count == 0) return 0;
@@ -1143,7 +1180,6 @@ public sealed class LayoutEngine
 
         return width;
     }
-
 
     private static Font GetOrCreateRunFont(Dictionary<InlineStyle, Font> cache, Font baseFont, InlineStyle style)
     {
@@ -1209,6 +1245,11 @@ public sealed class LayoutEngine
             sem[i].HeadingLevel = 0;
             sem[i].IsCodeFenceStart = false;
             sem[i].IsCodeFenceEnd = false;
+
+            sem[i].QuoteAdmonition = AdmonitionKind.None;
+            sem[i].IsAdmonitionMarkerLine = false;
+            sem[i].QuoteStartLine = -1;
+            sem[i].QuoteEndLine = -1;
         }
 
         foreach (var b in doc.Blocks)
@@ -1232,10 +1273,22 @@ public sealed class LayoutEngine
                     break;
 
                 case QuoteBlock q:
-                    for (int i = Math.Max(0, q.StartLine); i <= Math.Min(n - 1, q.EndLine); i++)
                     {
-                        sem[i].Kind = MarkdownBlockKind.Quote;
-                        sem[i].HeadingLevel = 0;
+                        int start = Math.Max(0, q.StartLine);
+                        int end = Math.Min(n - 1, q.EndLine);
+
+                        for (int i = start; i <= end; i++)
+                        {
+                            sem[i].Kind = MarkdownBlockKind.Quote;
+                            sem[i].HeadingLevel = 0;
+
+                            sem[i].QuoteAdmonition = q.Admonition;
+                            sem[i].QuoteStartLine = q.StartLine;
+                            sem[i].QuoteEndLine = q.EndLine;
+                            sem[i].IsAdmonitionMarkerLine =
+                                q.Admonition != AdmonitionKind.None &&
+                                i == q.AdmonitionMarkerLine;
+                        }
                     }
                     break;
 
@@ -1289,5 +1342,10 @@ public sealed class LayoutEngine
         public int HeadingLevel;
         public bool IsCodeFenceStart;
         public bool IsCodeFenceEnd;
+
+        public AdmonitionKind QuoteAdmonition;
+        public bool IsAdmonitionMarkerLine;
+        public int QuoteStartLine;
+        public int QuoteEndLine;
     }
 }
