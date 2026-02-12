@@ -15,7 +15,7 @@ public enum MarkdownBlockKind
 }
 
 /// <summary>
-/// Erweiterung für Quote-Alerts/Admonitions (z.B. [!NOTE]).
+/// Extension for quote alerts/admonitions (e.g. [!NOTE]).
 /// </summary>
 public enum AdmonitionKind
 {
@@ -36,7 +36,7 @@ public enum TableAlignment
 }
 
 /// <summary>
-/// Listentyp für einzelne Einträge.
+/// Marker type for list items.
 /// </summary>
 public enum ListMarkerKind
 {
@@ -56,15 +56,15 @@ public sealed record HeadingBlock(int Line, int Level, string Text)
     : MarkdownBlock(Line, Line, MarkdownBlockKind.Heading);
 
 /// <summary>
-/// Quote-Block, optional als Admonition (GitHub-Style):
+/// Quote block, optionally as admonition (GitHub style):
 /// > [!NOTE]
 /// > Text...
 /// </summary>
-/// <param name="StartLine">Erste Quellzeile des Quote-Blocks.</param>
-/// <param name="EndLine">Letzte Quellzeile des Quote-Blocks.</param>
-/// <param name="Admonition">Art der Admonition; None = normaler Quote-Block.</param>
-/// <param name="AdmonitionMarkerLine">Quellzeile des Markers (z.B. [!NOTE]); -1 wenn keiner.</param>
-/// <param name="AdmonitionMarkerText">Original-Text des Markers ohne führendes '>' (z.B. "[!NOTE]").</param>
+/// <param name="StartLine">First source line of the quote block.</param>
+/// <param name="EndLine">Last source line of the quote block.</param>
+/// <param name="Admonition">Admonition kind; None = normal quote block.</param>
+/// <param name="AdmonitionMarkerLine">Source line of marker (e.g. [!NOTE]); -1 if none.</param>
+/// <param name="AdmonitionMarkerText">Original marker text without leading '&gt;' (e.g. "[!NOTE]").</param>
 public sealed record QuoteBlock(
     int StartLine,
     int EndLine,
@@ -76,7 +76,7 @@ public sealed record QuoteBlock(
     public bool IsAdmonition => Admonition != AdmonitionKind.None;
 
     /// <summary>
-    /// Standard-Titel für die UI-Darstellung.
+    /// Default title for UI rendering.
     /// </summary>
     public string AdmonitionTitle => Admonition switch
     {
@@ -90,15 +90,23 @@ public sealed record QuoteBlock(
 }
 
 /// <summary>
-/// Ein einzelner Listeneintrag (inkl. Nested-Informationen).
+/// Single list item (including nested information and optional task metadata).
 /// </summary>
-/// <param name="SourceLine">Quellzeile des Listeneintrags.</param>
-/// <param name="Indent">Einrückung (Anzahl führender Spaces; Tabs ggf. vorher normalisieren).</param>
-/// <param name="Level">Verschachtelungsebene (0 = top-level).</param>
-/// <param name="MarkerKind">Ordered oder Unordered.</param>
-/// <param name="UnorderedMarker">Originalmarker bei Unordered ('-', '*', '+'), sonst null.</param>
-/// <param name="OrderedNumber">Aus Quelltext gelesene Nummer bei Ordered (z.B. 1), sonst null.</param>
-/// <param name="Text">Inhaltstext des Eintrags (ohne Marker).</param>
+/// <param name="SourceLine">Source line index of this list item.</param>
+/// <param name="Indent">Indent width (leading spaces; tabs may be normalized before).</param>
+/// <param name="Level">Nesting level (0 = top level).</param>
+/// <param name="MarkerKind">Ordered or unordered marker kind.</param>
+/// <param name="UnorderedMarker">Original unordered marker ('-', '*', '+'), else null.</param>
+/// <param name="OrderedNumber">Parsed ordered number (e.g. 1), else null.</param>
+/// <param name="Text">Item content text (without list marker and without task marker).</param>
+/// <param name="IsTask">True if this list item is a GFM task item (e.g. - [ ] / - [x]).</param>
+/// <param name="IsChecked">Task checked state; only meaningful when IsTask is true.</param>
+/// <param name="TaskMarkerStartColumn">Source column of '[' in [ ] / [x], -1 if unavailable.</param>
+/// <param name="TaskMarkerLength">Length of task marker token, typically 3 ("[ ]" / "[x]").</param>
+/// <param name="ContentStartColumn">
+/// Source column where item content starts (after list marker + spaces + optional task marker + trailing space).
+/// -1 if unavailable.
+/// </param>
 public sealed record ListItem(
     int SourceLine,
     int Indent,
@@ -106,13 +114,25 @@ public sealed record ListItem(
     ListMarkerKind MarkerKind,
     char? UnorderedMarker,
     int? OrderedNumber,
-    string Text);
+    string Text,
+    bool IsTask = false,
+    bool IsChecked = false,
+    int TaskMarkerStartColumn = -1,
+    int TaskMarkerLength = 0,
+    int ContentStartColumn = -1)
+{
+    public bool HasTaskMarkerSpan => IsTask && TaskMarkerStartColumn >= 0 && TaskMarkerLength > 0;
+
+    public string TaskMarkerText => !IsTask
+        ? string.Empty
+        : (IsChecked ? "[x]" : "[ ]");
+}
 
 /// <summary>
-/// Listenblock kann gemischt/nested sein.
-/// IsOrdered bleibt für Legacy/Kompatibilität erhalten:
-/// - true: alle Top-Level-Items ordered
-/// - false: sonst (mixed oder unordered)
+/// List block may be mixed/nested.
+/// IsOrdered remains for legacy compatibility:
+/// - true: all top-level items are ordered
+/// - false: otherwise (mixed or unordered)
 /// </summary>
 public sealed record ListBlock(
     int StartLine,
@@ -122,7 +142,7 @@ public sealed record ListBlock(
     : MarkdownBlock(StartLine, EndLine, MarkdownBlockKind.List)
 {
     /// <summary>
-    /// Legacy-Alias, damit alter Code mit ".Ordered" weiter kompiliert.
+    /// Legacy alias so old code using ".Ordered" keeps compiling.
     /// </summary>
     public bool Ordered => IsOrdered;
 }
@@ -131,7 +151,7 @@ public sealed record CodeFenceBlock(int StartLine, int EndLine, string Fence, st
     : MarkdownBlock(StartLine, EndLine, MarkdownBlockKind.CodeFence);
 
 /// <summary>
-/// Markdown Horizontal Rule (thematic break), z. B.:
+/// Markdown horizontal rule (thematic break), e.g.:
 /// ---
 /// ***
 /// ___
@@ -144,6 +164,6 @@ public sealed record TableRow(int SourceLine, IReadOnlyList<string> Cells);
 public sealed record TableBlock(
     int StartLine,
     int EndLine,
-    IReadOnlyList<TableRow> Rows,              // Header + Body rows (ohne Delimiter-Zeile)
-    IReadOnlyList<TableAlignment> Alignments)  // pro Spalte
+    IReadOnlyList<TableRow> Rows,              // Header + body rows (without delimiter row)
+    IReadOnlyList<TableAlignment> Alignments)  // per column
     : MarkdownBlock(StartLine, EndLine, MarkdownBlockKind.Table);

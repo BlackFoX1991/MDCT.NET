@@ -32,6 +32,17 @@ public static class MarkdownParser
         @"^(?<indent>[ \t]*)(?:(?<ul>[-+*])|(?<num>\d+)\.)(?<ws>[ \t]+)(?<text>.*)$",
         RegexOptions.Compiled);
 
+    // Task marker direkt am Anfang des Item-Texts:
+    // [ ] , [x], [X]
+    // Erlaubt:
+    //  - exakt Marker am Zeilenende
+    //  - Marker + mindestens ein Whitespace + Resttext
+    // Nicht erlaubt:
+    //  - "[x]Text" (ohne Whitespace)
+    private static readonly Regex TaskPrefixRegex = new(
+        @"^\[(?<state>[ xX])\](?:(?<ws>[ \t]+)(?<rest>.*)|(?<rest>))$",
+        RegexOptions.Compiled);
+
     public static IReadOnlyList<MarkdownBlock> Parse(IReadOnlyList<string> lines)
     {
         var blocks = new List<MarkdownBlock>();
@@ -161,7 +172,12 @@ public static class MarkdownParser
                 MarkerKind: parsed.MarkerKind,
                 UnorderedMarker: parsed.UnorderedMarker,
                 OrderedNumber: parsed.OrderedNumber,
-                Text: parsed.Text));
+                Text: parsed.Text,
+                IsTask: parsed.IsTask,
+                IsChecked: parsed.IsChecked,
+                TaskMarkerStartColumn: parsed.TaskMarkerStartColumn,
+                TaskMarkerLength: parsed.TaskMarkerLength,
+                ContentStartColumn: parsed.ContentStartColumn));
         }
 
         return result;
@@ -186,7 +202,44 @@ public static class MarkdownParser
         ListMarkerKind MarkerKind,
         char? UnorderedMarker,
         int? OrderedNumber,
-        string Text);
+        string Text,
+        bool IsTask,
+        bool IsChecked,
+        int TaskMarkerStartColumn,
+        int TaskMarkerLength,
+        int ContentStartColumn);
+
+    private readonly record struct ParsedTaskPrefix(
+        bool IsChecked,
+        string RestText,
+        int MarkerLength,
+        int WsAfterLength);
+
+    private static bool TryParseTaskPrefix(string text, out ParsedTaskPrefix parsed)
+    {
+        parsed = default;
+
+        if (text is null)
+            return false;
+
+        var m = TaskPrefixRegex.Match(text);
+        if (!m.Success)
+            return false;
+
+        char state = m.Groups["state"].Value[0];
+        bool isChecked = state == 'x' || state == 'X';
+
+        int wsLen = m.Groups["ws"].Success ? m.Groups["ws"].Length : 0;
+        string rest = m.Groups["rest"].Success ? m.Groups["rest"].Value : string.Empty;
+
+        parsed = new ParsedTaskPrefix(
+            IsChecked: isChecked,
+            RestText: rest,
+            MarkerLength: 3, // [ ] / [x] / [X]
+            WsAfterLength: wsLen);
+
+        return true;
+    }
 
     private static bool TryParseListLine(string line, out ParsedListLine parsed)
     {
@@ -200,7 +253,29 @@ public static class MarkdownParser
 
         Group ul = m.Groups["ul"];
         Group num = m.Groups["num"];
-        string text = m.Groups["text"].Value;
+
+        Group textGroup = m.Groups["text"];
+        string textRaw = textGroup.Value;
+
+        int textStartColumn = textGroup.Index;
+        int contentStartColumn = textStartColumn;
+
+        bool isTask = false;
+        bool isChecked = false;
+        int taskMarkerStartColumn = -1;
+        int taskMarkerLength = 0;
+
+        string finalText = textRaw;
+
+        if (TryParseTaskPrefix(textRaw, out var task))
+        {
+            isTask = true;
+            isChecked = task.IsChecked;
+            taskMarkerStartColumn = textStartColumn;
+            taskMarkerLength = task.MarkerLength;
+            contentStartColumn = textStartColumn + task.MarkerLength + task.WsAfterLength;
+            finalText = task.RestText;
+        }
 
         if (ul.Success)
         {
@@ -210,7 +285,12 @@ public static class MarkdownParser
                 MarkerKind: ListMarkerKind.Unordered,
                 UnorderedMarker: marker,
                 OrderedNumber: null,
-                Text: text);
+                Text: finalText,
+                IsTask: isTask,
+                IsChecked: isChecked,
+                TaskMarkerStartColumn: taskMarkerStartColumn,
+                TaskMarkerLength: taskMarkerLength,
+                ContentStartColumn: contentStartColumn);
             return true;
         }
 
@@ -221,7 +301,12 @@ public static class MarkdownParser
                 MarkerKind: ListMarkerKind.Ordered,
                 UnorderedMarker: null,
                 OrderedNumber: n,
-                Text: text);
+                Text: finalText,
+                IsTask: isTask,
+                IsChecked: isChecked,
+                TaskMarkerStartColumn: taskMarkerStartColumn,
+                TaskMarkerLength: taskMarkerLength,
+                ContentStartColumn: contentStartColumn);
             return true;
         }
 

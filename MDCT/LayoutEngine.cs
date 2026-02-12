@@ -25,10 +25,17 @@ public sealed class LayoutLine
     public required int HeadingLevel { get; init; }
     public required LineFontRole FontRole { get; init; }
 
-    // Bereits inline-geparste Runs (ohne Markdown-Marker)
+    // Already inline-parsed runs (without markdown markers)
     public required IReadOnlyList<InlineRun> InlineRuns { get; init; }
 
-    // Quote/Admonition-Metadaten
+    // Task-list metadata
+    public bool IsTaskListItem { get; init; }
+    public bool IsTaskChecked { get; init; }
+    public int TaskMarkerSourceStart { get; init; } = -1; // '[' index in source
+    public int TaskMarkerSourceLength { get; init; }      // usually 3 => [ ] / [x]
+    public int ListContentSourceStart { get; init; } = -1; // source column where visible content starts
+
+    // Quote/Admonition metadata
     public AdmonitionKind QuoteAdmonition { get; init; } = AdmonitionKind.None;
     public bool IsAdmonitionMarkerLine { get; init; }
     public int QuoteStartLine { get; init; } = -1;
@@ -179,7 +186,7 @@ public sealed class LayoutEngine
     }
 
     // ------------------------------------------------------------
-    // Fence-Erkennung:
+    // Fence detection:
     // - Backtick: >=3
     // - Tilde: >=3
     // ------------------------------------------------------------
@@ -440,7 +447,7 @@ public sealed class LayoutEngine
     /// forceRawCodeFenceStarts: fence start-lines that should be rendered raw (show full source including markers).
     /// forceRawLines: source-lines that must be rendered raw (identity projection, no inline parsing, no marker-hiding).
     /// forceRawInlineLines: source-lines where ONLY inline markdown must stay visible as source
-    ///                    (no InlineMarkdown.Parse, aber block-prefix Projektion darf bleiben).
+    ///                    (no InlineMarkdown.Parse, but block-prefix projection can stay).
     /// </summary>
     public void Rebuild(
         DocumentModel doc,
@@ -472,7 +479,7 @@ public sealed class LayoutEngine
 
         var semantics = BuildSemantics(doc);
 
-        // Mapping SourceLine -> ListItem (für ordered/unordered/nested Rendering)
+        // Mapping SourceLine -> ListItem
         var listItemByLine = new Dictionary<int, ListItem>();
         foreach (var lb in doc.Blocks.OfType<ListBlock>())
         {
@@ -495,7 +502,7 @@ public sealed class LayoutEngine
         var fenceSpans = BuildCodeFenceSpans(doc);
         int[] fenceSpanByLine = Enumerable.Repeat(-1, doc.LineCount).ToArray();
 
-        // Parser-CodeFence neutralisieren (eigene Span-Logik übernimmt)
+        // Neutralize parser code fence (custom span logic is authoritative)
         for (int i = 0; i < doc.LineCount; i++)
         {
             if (semantics[i].Kind == MarkdownBlockKind.CodeFence)
@@ -509,7 +516,7 @@ public sealed class LayoutEngine
             }
         }
 
-        // Eigene Fence-Spans anwenden
+        // Apply custom fence spans
         for (int si = 0; si < fenceSpans.Count; si++)
         {
             var sp = fenceSpans[si];
@@ -533,7 +540,7 @@ public sealed class LayoutEngine
         int lineIdx = 0;
         while (lineIdx < doc.LineCount)
         {
-            // Table als Grid rendern
+            // Render table as grid
             if (tableStarts.TryGetValue(lineIdx, out var tb))
             {
                 var tableLayout = BuildTableLayout(tb, y);
@@ -545,7 +552,7 @@ public sealed class LayoutEngine
                 continue;
             }
 
-            // Source-Zeilen von Grid-Tables überspringen
+            // Skip source lines covered by grid tables
             if (_tableSourceLines.Contains(lineIdx))
             {
                 lineIdx++;
@@ -558,7 +565,7 @@ public sealed class LayoutEngine
             bool forceRawThisLine = forceRawLines?.Contains(lineIdx) == true;
             bool forceRawInlineThisLine = forceRawInlineLines?.Contains(lineIdx) == true;
 
-            // Parser sagt Table, aber hier raw -> als normaler Text rendern
+            // Parser says Table, but raw mode is active -> render as normal text
             if (sem.Kind == MarkdownBlockKind.Table)
             {
                 sem.Kind = string.IsNullOrWhiteSpace(source)
@@ -572,6 +579,13 @@ public sealed class LayoutEngine
                 sem.Kind == MarkdownBlockKind.Quote &&
                 sem.QuoteAdmonition != AdmonitionKind.None &&
                 sem.IsAdmonitionMarkerLine;
+
+            // Task metadata defaults for this line
+            bool isTaskListItem = false;
+            bool isTaskChecked = false;
+            int taskMarkerSourceStart = -1;
+            int taskMarkerSourceLength = 0;
+            int listContentSourceStart = -1;
 
             LineFontRole role = ResolveFontRole(sem.Kind);
             if (isAdmonitionMarkerLine && !forceRawThisLine)
@@ -594,7 +608,7 @@ public sealed class LayoutEngine
 
                 if (forceRawThisLine)
                 {
-                    // Einheitlich raw: komplette Source sichtbar + keine inline transformation
+                    // Uniform raw: full source + no inline transform
                     proj = CreateIdentityProjection(source);
                     runs = proj.DisplayText.Length == 0
                         ? Array.Empty<InlineRun>()
@@ -619,7 +633,7 @@ public sealed class LayoutEngine
 
                     if (!hasSpan || rawFence)
                     {
-                        // Raw-Modus: komplette Source inkl. Marker
+                        // Raw mode: full source including markers
                         proj = CreateIdentityProjection(source);
                     }
                     else
@@ -627,7 +641,7 @@ public sealed class LayoutEngine
                         var span = fenceSpans[spanIdx];
                         var hideRanges = new List<(int Start, int Length)>(2);
 
-                        // Nur Marker ausblenden, Inhalt sichtbar lassen
+                        // Hide only markers, keep content visible
                         if (lineIdx == span.StartLine && span.StartMarkerCol >= 0 && span.StartMarkerLen > 0)
                             hideRanges.Add((span.StartMarkerCol, span.StartMarkerLen));
 
@@ -645,16 +659,22 @@ public sealed class LayoutEngine
                 }
                 else if (isAdmonitionMarkerLine)
                 {
-                    // Marker-Zeile (z.B. > [!NOTE]) im Rich-Modus nicht als Body-Text anzeigen.
-                    // Der Editor kann an dieser Zeile stattdessen einen visuellen Header rendern.
+                    // Marker line (e.g. > [!NOTE]) is hidden in rich mode.
+                    // Editor can render a visual header instead.
                     proj = VisualProjection.HidePrefix(source, source.Length);
                     runs = Array.Empty<InlineRun>();
                 }
                 else if (sem.Kind == MarkdownBlockKind.List && listItemByLine.TryGetValue(lineIdx, out var li))
                 {
+                    isTaskListItem = li.IsTask;
+                    isTaskChecked = li.IsChecked;
+                    taskMarkerSourceStart = li.TaskMarkerStartColumn;
+                    taskMarkerSourceLength = li.TaskMarkerLength;
+                    listContentSourceStart = li.ContentStartColumn;
+
                     if (forceRawInlineThisLine)
                     {
-                        // bei inline-raw in Listen komplette Source zeigen
+                        // In inline-raw mode for lists show full source
                         proj = CreateIdentityProjection(source);
                         runs = proj.DisplayText.Length == 0
                             ? Array.Empty<InlineRun>()
@@ -662,7 +682,7 @@ public sealed class LayoutEngine
                     }
                     else
                     {
-                        // Ordered/Unordered/Nested sichtbar + korrektes Mapping
+                        // Ordered/unordered/nested/task visual + stable source mapping
                         proj = BuildListProjection(source, li);
 
                         InlineParseResult inline = InlineMarkdown.Parse(proj.DisplayText);
@@ -672,14 +692,14 @@ public sealed class LayoutEngine
                 }
                 else
                 {
-                    // Für Nicht-Listen bleibt ProjectionFactory zuständig
+                    // Non-list lines use ProjectionFactory
                     var prefixProj = ProjectionFactory.Build(sem.Kind, source);
 
                     if (SupportsInlineFormatting(sem.Kind))
                     {
                         if (forceRawInlineThisLine)
                         {
-                            // Prefix-Projektion bleibt, aber inline marker NICHT entfernen
+                            // Keep block prefix projection, keep inline markers visible
                             proj = prefixProj;
                             runs = proj.DisplayText.Length == 0
                                 ? Array.Empty<InlineRun>()
@@ -723,6 +743,12 @@ public sealed class LayoutEngine
                     HeadingLevel = sem.HeadingLevel,
                     FontRole = role,
                     InlineRuns = runs,
+
+                    IsTaskListItem = isTaskListItem,
+                    IsTaskChecked = isTaskChecked,
+                    TaskMarkerSourceStart = taskMarkerSourceStart,
+                    TaskMarkerSourceLength = taskMarkerSourceLength,
+                    ListContentSourceStart = listContentSourceStart,
 
                     QuoteAdmonition = sem.QuoteAdmonition,
                     IsAdmonitionMarkerLine = sem.IsAdmonitionMarkerLine,
@@ -1002,18 +1028,21 @@ public sealed class LayoutEngine
         source ??= string.Empty;
         int n = source.Length;
 
-        int contentStart = FindListContentStart(source);
-        contentStart = Math.Clamp(contentStart, 0, n);
+        int contentStart = ResolveListContentStart(source, item);
 
         string indent = new string(' ', Math.Max(0, item.Level) * 2);
         string marker = item.MarkerKind == ListMarkerKind.Ordered
             ? $"{(item.OrderedNumber ?? 1)}. "
             : "• ";
 
-        string content = contentStart < n ? source[contentStart..] : string.Empty;
-        string display = indent + marker + content;
+        string taskGlyph = item.IsTask
+            ? (item.IsChecked ? "☑ " : "☐ ")
+            : string.Empty;
 
-        int prefixLen = indent.Length + marker.Length;
+        string content = contentStart < n ? source[contentStart..] : string.Empty;
+        string display = indent + marker + taskGlyph + content;
+
+        int prefixLen = indent.Length + marker.Length + taskGlyph.Length;
 
         int[] s2v = new int[n + 1];
         for (int s = 0; s <= n; s++)
@@ -1032,6 +1061,20 @@ public sealed class LayoutEngine
         }
 
         return VisualProjection.Create(display, v2s, s2v);
+    }
+
+    private static int ResolveListContentStart(string source, ListItem item)
+    {
+        source ??= string.Empty;
+        int n = source.Length;
+
+        int fallback = FindListContentStart(source);
+        int candidate = fallback;
+
+        if (item.ContentStartColumn >= 0 && item.ContentStartColumn <= n)
+            candidate = item.ContentStartColumn;
+
+        return Math.Clamp(candidate, 0, n);
     }
 
     private static int FindListContentStart(string line)

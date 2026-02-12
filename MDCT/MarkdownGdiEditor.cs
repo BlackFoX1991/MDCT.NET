@@ -21,6 +21,10 @@ public sealed class MarkdownGdiEditor : ScrollableControl
     private readonly LayoutEngine _layout = new();
     private readonly EditorState _state = new();
 
+    private static readonly Regex TaskMarkerRegex =
+    new(@"\[(?<mark>[ xX])\]", RegexOptions.Compiled);
+
+
     // Tables can be displayed non-destructively as raw source
     private readonly HashSet<int> _rawTableStartLines = new();
     private readonly Dictionary<int, Font> _headingFontCache = new();
@@ -275,13 +279,20 @@ public sealed class MarkdownGdiEditor : ScrollableControl
         if (_cellEditor is not null)
             EndCellEdit(discard: false, move: CellMove.None);
 
+        // Task checkbox toggle (☐ / ☑) by click
+        if (TryToggleTaskCheckboxAtPoint(content))
+        {
+            _mouseSelecting = false;
+            return;
+        }
+
         _mouseSelecting = true;
         var pos = _layout.HitTestText(content);
         bool shift = (ModifierKeys & Keys.Shift) != 0;
 
         _state.SetCaret(pos, shift, _doc);
 
-        // Immer neu aufbauen, damit Raw/Inline-Source-Modus dem Caret folgt
+        // Always rebuild so Raw/Inline source mode follows caret
         RebuildLayout();
 
         NormalizeCaretOutOfTables();
@@ -295,13 +306,19 @@ public sealed class MarkdownGdiEditor : ScrollableControl
     {
         base.OnMouseMove(e);
 
+        if (_cellEditor is null && !_mouseSelecting)
+        {
+            Point content = ClientToContent(e.Location);
+            Cursor = IsPointOverTaskCheckbox(content) ? Cursors.Hand : Cursors.IBeam;
+        }
+
         if (!_mouseSelecting) return;
         if (_cellEditor is not null) return;
 
         var pos = _layout.HitTestText(ClientToContent(e.Location));
         _state.SetCaret(pos, shift: true, _doc);
 
-        // Immer neu aufbauen, damit Raw/Inline-Source-Modus dem Caret folgt
+        // Always rebuild so Raw/Inline source mode follows caret
         RebuildLayout();
 
         NormalizeCaretOutOfTables();
@@ -310,6 +327,144 @@ public sealed class MarkdownGdiEditor : ScrollableControl
         EnsureCaretVisible();
         Invalidate();
     }
+
+    private bool TryToggleTaskCheckboxAtPoint(Point contentPoint)
+    {
+        if (!TryBuildTaskCheckboxHit(contentPoint, out LayoutLine line, out _))
+            return false;
+
+        // Place caret near marker and clear selection before toggling
+        int caretCol = line.TaskMarkerSourceStart >= 0 ? line.TaskMarkerSourceStart + 1 : 0;
+        caretCol = Math.Clamp(caretCol, 0, _doc.GetLineLength(line.SourceLine));
+        _state.SetCaret(new MarkdownPosition(line.SourceLine, caretCol), shift: false, _doc);
+
+        ApplyDocumentEdit(() =>
+            ToggleTaskMarkerOnLine(
+                line.SourceLine,
+                line.TaskMarkerSourceStart,
+                line.TaskMarkerSourceLength));
+
+        return true;
+    }
+
+    private bool IsPointOverTaskCheckbox(Point contentPoint)
+    {
+        return TryBuildTaskCheckboxHit(contentPoint, out _, out _);
+    }
+
+    private bool TryBuildTaskCheckboxHit(Point contentPoint, out LayoutLine line, out Rectangle hitRect)
+    {
+        line = null!;
+        hitRect = Rectangle.Empty;
+
+        var pos = _layout.HitTestText(contentPoint);
+        LayoutLine? candidate = _layout.GetLine(pos.Line);
+        if (candidate is null) return false;
+
+        if (contentPoint.Y < candidate.Bounds.Top - 1 || contentPoint.Y > candidate.Bounds.Bottom + 1)
+            return false;
+
+        if (candidate.Kind != MarkdownBlockKind.List || !candidate.IsTaskListItem)
+            return false;
+
+        if (candidate.ListContentSourceStart < 0)
+            return false;
+
+        string display = candidate.Projection.DisplayText;
+        if (string.IsNullOrEmpty(display))
+            return false;
+
+        int srcContentStart = Math.Clamp(candidate.ListContentSourceStart, 0, candidate.SourceText.Length);
+        int visContentStart = Math.Clamp(candidate.Projection.SourceToVisual[srcContentStart], 0, display.Length);
+
+        // BuildListProjection creates "... + (☐|☑) + ' ' + content"
+        int checkboxGlyphVisStart = visContentStart - 2; // points to ☐ or ☑
+        if (checkboxGlyphVisStart < 0 || checkboxGlyphVisStart >= display.Length)
+            return false;
+
+        char glyph = display[checkboxGlyphVisStart];
+        if (glyph != '☐' && glyph != '☑')
+            return false;
+
+        int x1 = candidate.TextX + MeasureVisualPrefix(candidate, checkboxGlyphVisStart);
+        int x2 = candidate.TextX + MeasureVisualPrefix(candidate, checkboxGlyphVisStart + 1);
+
+        int padX = 4;
+        hitRect = Rectangle.FromLTRB(
+            x1 - padX,
+            candidate.Bounds.Top,
+            x2 + padX,
+            candidate.Bounds.Bottom);
+
+        line = candidate;
+        return hitRect.Contains(contentPoint);
+    }
+
+    private bool ToggleTaskMarkerOnLine(int sourceLine, int markerStart, int markerLength)
+    {
+        if (sourceLine < 0 || sourceLine >= _doc.LineCount)
+            return false;
+
+        string source = _doc.GetLine(sourceLine);
+        if (string.IsNullOrEmpty(source))
+            return false;
+
+        if (TryToggleTaskMarkerAtKnownRange(source, markerStart, markerLength, out string updated))
+        {
+            _doc.ReplaceLines(sourceLine, sourceLine, new[] { updated });
+            return true;
+        }
+
+        // Fallback if cached marker range is stale
+        int idx = FindTaskMarkerInListSource(source);
+        if (idx < 0 || idx + 2 >= source.Length)
+            return false;
+
+        char current = source[idx + 1];
+        if (current != ' ' && current != 'x' && current != 'X')
+            return false;
+
+        char next = (current == 'x' || current == 'X') ? ' ' : 'x';
+        string fallback = source[..(idx + 1)] + next + source[(idx + 2)..];
+
+        if (string.Equals(fallback, source, StringComparison.Ordinal))
+            return false;
+
+        _doc.ReplaceLines(sourceLine, sourceLine, new[] { fallback });
+        return true;
+    }
+
+    private static bool TryToggleTaskMarkerAtKnownRange(
+        string source,
+        int markerStart,
+        int markerLength,
+        out string updated)
+    {
+        updated = source;
+        if (string.IsNullOrEmpty(source)) return false;
+        if (markerLength < 3) return false;
+        if (markerStart < 0 || markerStart + 2 >= source.Length) return false;
+
+        if (source[markerStart] != '[' || source[markerStart + 2] != ']')
+            return false;
+
+        char current = source[markerStart + 1];
+        if (current != ' ' && current != 'x' && current != 'X')
+            return false;
+
+        char next = (current == 'x' || current == 'X') ? ' ' : 'x';
+        updated = source[..(markerStart + 1)] + next + source[(markerStart + 2)..];
+
+        return !string.Equals(updated, source, StringComparison.Ordinal);
+    }
+
+    private static int FindTaskMarkerInListSource(string source)
+    {
+        if (string.IsNullOrEmpty(source)) return -1;
+        Match m = TaskMarkerRegex.Match(source);
+        return m.Success ? m.Index : -1;
+    }
+
 
     protected override void OnMouseUp(MouseEventArgs e)
     {
