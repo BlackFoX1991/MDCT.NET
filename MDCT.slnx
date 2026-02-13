@@ -1,3 +1,4 @@
 <Solution>
-  <Project Path="MDCT/MDCT.csproj" />
+  <Project Path="MarkdownControlNET/MarkdownControlNET.csproj" Id="8a78612b-1f87-4451-85d9-1ad54d0a12f3" />
+  <Project Path="MarkdownStudio/MarkdownEditor.csproj" Id="7051f8d1-6978-4da0-825b-c67ce46586a1" />
 </Solution>
