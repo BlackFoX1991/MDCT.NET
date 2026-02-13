@@ -76,6 +76,7 @@
             menuStrip1.SuspendLayout();
             toolStrip1.SuspendLayout();
             panel1.SuspendLayout();
+            ((System.ComponentModel.ISupportInitialize)markdownGdiEditor1).BeginInit();
             SuspendLayout();
             // 
             // menuStrip1
@@ -239,13 +240,13 @@
             // anpassenToolStripMenuItem
             // 
             anpassenToolStripMenuItem.Name = "anpassenToolStripMenuItem";
-            anpassenToolStripMenuItem.Size = new Size(180, 22);
+            anpassenToolStripMenuItem.Size = new Size(125, 22);
             anpassenToolStripMenuItem.Text = "&Anpassen";
             // 
             // optionenToolStripMenuItem
             // 
             optionenToolStripMenuItem.Name = "optionenToolStripMenuItem";
-            optionenToolStripMenuItem.Size = new Size(180, 22);
+            optionenToolStripMenuItem.Size = new Size(125, 22);
             optionenToolStripMenuItem.Text = "&Optionen";
             // 
             // hilfeToolStripMenuItem
@@ -398,15 +399,23 @@
             // 
             markdownGdiEditor1.AutoScroll = true;
             markdownGdiEditor1.AutoScrollMinSize = new Size(1060, 619);
-            markdownGdiEditor1.BackColor = Color.White;
+            markdownGdiEditor1.BackColor = Color.FromArgb(30, 32, 36);
+            markdownGdiEditor1.CodeBackgroundColor = Color.FromArgb(42, 45, 52);
             markdownGdiEditor1.Dock = DockStyle.Fill;
-            markdownGdiEditor1.ForeColor = Color.Black;
+            markdownGdiEditor1.ForeColor = Color.FromArgb(232, 235, 241);
+            markdownGdiEditor1.InlineCodeBackgroundColor = Color.FromArgb(56, 61, 72);
+            markdownGdiEditor1.InlineCodeBorderColor = Color.FromArgb(98, 106, 120);
             markdownGdiEditor1.Location = new Point(10, 10);
-            markdownGdiEditor1.Markdown = "";
+            markdownGdiEditor1.Markdown = "# Header 1";
             markdownGdiEditor1.Name = "markdownGdiEditor1";
+            markdownGdiEditor1.QuoteBarColor = Color.FromArgb(118, 125, 136);
+            markdownGdiEditor1.SelectionColor = Color.FromArgb(120, 76, 151, 255);
             markdownGdiEditor1.Size = new Size(1060, 619);
             markdownGdiEditor1.TabIndex = 4;
-            markdownGdiEditor1.Text = "markdownGdiEditor1";
+            markdownGdiEditor1.TableCellBackgroundColor = Color.FromArgb(38, 41, 48);
+            markdownGdiEditor1.TableGridColor = Color.FromArgb(82, 88, 99);
+            markdownGdiEditor1.TableHeaderBackgroundColor = Color.FromArgb(52, 57, 66);
+            markdownGdiEditor1.ThemeMode = MarkdownGdi.EditorThemeMode.Dark;
             // 
             // mkMain
             // 
@@ -425,6 +434,7 @@
             toolStrip1.ResumeLayout(false);
             toolStrip1.PerformLayout();
             panel1.ResumeLayout(false);
+            ((System.ComponentModel.ISupportInitialize)markdownGdiEditor1).EndInit();
             ResumeLayout(false);
             PerformLayout();
         }

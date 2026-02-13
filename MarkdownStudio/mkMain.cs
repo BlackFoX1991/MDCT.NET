@@ -5,6 +5,7 @@ namespace MarkdownStudio
         public mkMain()
         {
             InitializeComponent();
+           
         }
     }
 }

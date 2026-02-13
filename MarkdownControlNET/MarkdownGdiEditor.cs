@@ -1,11 +1,11 @@
-﻿using System;
-using System.Collections.Generic;
-using System.ComponentModel;
-using System.Drawing;
-using System.Linq;
+﻿using System.ComponentModel;
+using System.Diagnostics.CodeAnalysis;
+using System.Drawing.Design;
 using System.Text;
 using System.Text.RegularExpressions;
-using System.Windows.Forms;
+using Microsoft.Win32;
+
+
 
 namespace MarkdownGdi;
 
@@ -15,8 +15,38 @@ public sealed class MarkdownChangedEventArgs : EventArgs
     public MarkdownChangedEventArgs(string markdown) => Markdown = markdown;
 }
 
-public sealed class MarkdownGdiEditor : ScrollableControl
+
+public sealed class ThemeChangedEventArgs : EventArgs
 {
+    public ThemeChangedEventArgs(bool oldIsDarkTheme, bool newIsDarkTheme)
+    {
+        OldIsDarkTheme = oldIsDarkTheme;
+        NewIsDarkTheme = newIsDarkTheme;
+    }
+
+    public bool OldIsDarkTheme { get; }
+    public bool NewIsDarkTheme { get; }
+}
+
+
+
+public enum EditorThemeMode
+{
+    System,
+    Light,
+    Dark
+}
+
+
+public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
+{
+    // ... deine bestehenden Felder ...
+
+    private bool _isInitializing;
+    private bool _pendingInitialRefresh = true;
+
+    // ... restliche Felder unverändert ...
+
     private readonly DocumentModel _doc = new();
     private readonly LayoutEngine _layout = new();
     private readonly EditorState _state = new();
@@ -57,16 +87,423 @@ public sealed class MarkdownGdiEditor : ScrollableControl
     private static readonly Regex DelimiterDraftLineRegex =
         new(@"^\s*\|[\|\:\-\s]*\|?\s*$", RegexOptions.Compiled);
 
-    private readonly Color _selectionColor = Color.FromArgb(120, 51, 153, 255);
-    private readonly Color _quoteBarColor = Color.Silver;
-    private readonly Color _codeBg = Color.FromArgb(245, 245, 245);
-    private readonly Color _tableHeaderBg = Color.FromArgb(240, 244, 250);
-    private readonly Color _tableCellBg = Color.White;
-    private readonly Color _tableGrid = Color.Gainsboro;
-    private readonly Color _inlineCodeBg = Color.FromArgb(236, 240, 244);
-    private readonly Color _inlineCodeBorder = Color.FromArgb(210, 216, 224);
+
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Visible)]
+    public Color SelectionColor
+    {
+        get => _selectionColor;
+        set { _selectionColor = value; Invalidate(); }
+    }
+
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Visible)]
+    public Color QuoteBarColor
+    {
+        get => _quoteBarColor;
+        set { _quoteBarColor = value; Invalidate(); }
+    }
+
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Visible)]
+    public Color CodeBackgroundColor
+    {
+        get => _codeBg;
+        set { _codeBg = value; Invalidate(); }
+    }
+
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Visible)]
+    public Color TableHeaderBackgroundColor
+    {
+        get => _tableHeaderBg;
+        set { _tableHeaderBg = value; Invalidate(); }
+    }
+
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Visible)]
+    public Color TableCellBackgroundColor
+    {
+        get => _tableCellBg;
+        set { _tableCellBg = value; Invalidate(); }
+    }
+
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Visible)]
+    public Color TableGridColor
+    {
+        get => _tableGrid;
+        set { _tableGrid = value; Invalidate(); }
+    }
+
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Visible)]
+    public Color InlineCodeBackgroundColor
+    {
+        get => _inlineCodeBg;
+        set { _inlineCodeBg = value; Invalidate(); }
+    }
+
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Visible)]
+    public Color InlineCodeBorderColor
+    {
+        get => _inlineCodeBorder;
+        set { _inlineCodeBorder = value; Invalidate(); }
+    }
+
+    public void SetTheme(bool darkTheme)
+    {
+        // Manuelles Setzen deaktiviert Auto-Sync bewusst
+        AllowAutoThemeChange = false;
+        ApplyTheme(darkTheme, raiseEvent: true);
+    }
+
+    private bool IsInDesigner
+        => LicenseManager.UsageMode == LicenseUsageMode.Designtime || (Site?.DesignMode ?? false);
+
+    private void ApplyThemeFromSystem(bool raiseEvent)
+    {
+        bool dark = ReadWindowsAppsUseDarkTheme();
+        ApplyTheme(dark, raiseEvent);
+    }
+
+    private static bool ReadWindowsAppsUseDarkTheme()
+    {
+        try
+        {
+            using RegistryKey? key = Registry.CurrentUser.OpenSubKey(
+                @"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize", writable: false);
+
+            object? v = key?.GetValue("AppsUseLightTheme");
+            return v switch
+            {
+                int i => i == 0,   // 0 = dark
+                long l => l == 0L,
+                _ => false         // fallback: light
+            };
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private void ApplyTheme(bool darkTheme, bool raiseEvent)
+    {
+        bool old = _isDarkTheme;
+        _isDarkTheme = darkTheme;
+
+        if (darkTheme)
+            ApplyDarkPalette();
+        else
+            ApplyLightPalette();
+
+        if (_cellEditor is not null)
+        {
+            _cellEditor.BackColor = _tableCellBg;
+            _cellEditor.ForeColor = ForeColor;
+        }
+
+        Invalidate(new Rectangle(Point.Empty, ClientSize), invalidateChildren: false);
+
+        if (raiseEvent && old != _isDarkTheme)
+            ThemeChanged?.Invoke(this, new ThemeChangedEventArgs(old, _isDarkTheme));
+    }
+
+    private void ApplyLightPalette()
+    {
+        BackColor = Color.White;
+        ForeColor = Color.Black;
+
+        _selectionColor = Color.FromArgb(120, 51, 153, 255);
+        _quoteBarColor = Color.Silver;
+
+        _codeBg = Color.FromArgb(245, 245, 245);
+        _tableHeaderBg = Color.FromArgb(240, 244, 250);
+        _tableCellBg = Color.White;
+        _tableGrid = Color.Gainsboro;
+
+        _inlineCodeBg = Color.FromArgb(236, 240, 244);
+        _inlineCodeBorder = Color.FromArgb(210, 216, 224);
+
+        _horizontalRuleColor = Color.Silver;
+        _tableOuterBorderColor = Color.Silver;
+
+        _tableDraftBg = Color.FromArgb(255, 252, 242);
+        _tableDraftBorder = Color.FromArgb(230, 190, 120);
+        _tableDraftHintColor = Color.DarkGoldenrod;
+    }
+
+    private void ApplyDarkPalette()
+    {
+        BackColor = Color.FromArgb(30, 30, 30);
+        ForeColor = Color.FromArgb(230, 230, 230);
+
+        _selectionColor = Color.FromArgb(120, 88, 145, 255);
+        _quoteBarColor = Color.FromArgb(110, 118, 130);
+
+        _codeBg = Color.FromArgb(42, 45, 52);
+        _tableHeaderBg = Color.FromArgb(48, 52, 60);
+        _tableCellBg = Color.FromArgb(36, 39, 46);
+        _tableGrid = Color.FromArgb(74, 79, 89);
+
+        _inlineCodeBg = Color.FromArgb(56, 60, 68);
+        _inlineCodeBorder = Color.FromArgb(88, 94, 106);
+
+        _horizontalRuleColor = Color.FromArgb(108, 116, 130);
+        _tableOuterBorderColor = Color.FromArgb(118, 126, 140);
+
+        _tableDraftBg = Color.FromArgb(58, 50, 38);
+        _tableDraftBorder = Color.FromArgb(176, 132, 68);
+        _tableDraftHintColor = Color.FromArgb(226, 191, 128);
+    }
+
+    private void UpdateSystemThemeSubscription()
+    {
+        bool shouldHook = !IsDisposed && !IsInDesigner && AllowAutoThemeChange;
+
+        if (shouldHook && !_systemThemeEventsHooked)
+        {
+            try
+            {
+                SystemEvents.UserPreferenceChanged += OnSystemUserPreferenceChanged;
+                _systemThemeEventsHooked = true;
+            }
+            catch
+            {
+                // ignore
+            }
+        }
+        else if (!shouldHook && _systemThemeEventsHooked)
+        {
+            UnsubscribeSystemThemeEvents();
+        }
+    }
+
+    private void UnsubscribeSystemThemeEvents()
+    {
+        if (!_systemThemeEventsHooked) return;
+
+        try
+        {
+            SystemEvents.UserPreferenceChanged -= OnSystemUserPreferenceChanged;
+        }
+        catch
+        {
+            // ignore
+        }
+
+        _systemThemeEventsHooked = false;
+    }
+
+    private void OnSystemUserPreferenceChanged(object? sender, UserPreferenceChangedEventArgs e)
+    {
+        if (!AllowAutoThemeChange || IsDisposed) return;
+
+        if (e.Category is not (UserPreferenceCategory.General
+                               or UserPreferenceCategory.Color
+                               or UserPreferenceCategory.VisualStyle))
+            return;
+
+        if (!IsHandleCreated) return;
+
+        void Apply() => ApplyThemeFromSystem(raiseEvent: true);
+
+        try
+        {
+            if (InvokeRequired)
+                BeginInvoke((MethodInvoker)Apply);
+            else
+                Apply();
+        }
+        catch
+        {
+            // ignore (handle may be gone)
+        }
+    }
+
+
+
+    private Color _selectionColor = Color.FromArgb(120, 51, 153, 255);
+    private Color _quoteBarColor = Color.Silver;
+    private Color _codeBg = Color.FromArgb(245, 245, 245);
+    private Color _tableHeaderBg = Color.FromArgb(240, 244, 250);
+    private Color _tableCellBg = Color.White;
+    private Color _tableGrid = Color.Gainsboro;
+    private Color _inlineCodeBg = Color.FromArgb(236, 240, 244);
+    private Color _inlineCodeBorder = Color.FromArgb(210, 216, 224);
     private const int InlineCodePadX = 4;
     private const int InlineCodePadY = 1;
+
+    private EditorThemeMode _themeMode = EditorThemeMode.System;
+    private bool _isDarkThemeEffective;
+
+    private Color _hrColor = Color.Silver;
+    private Color _tableOuterBorderColor = Color.Silver;
+    private Color _tableDraftBg = Color.FromArgb(255, 252, 242);
+    private Color _tableDraftBorder = Color.FromArgb(230, 190, 120);
+    private Color _tableDraftHint = Color.DarkGoldenrod;
+    private Color _cellEditorBack = Color.White;
+    private Color _cellEditorFore = Color.Black;
+    private Color _horizontalRuleColor = Color.Silver;
+    private Color _tableDraftHintColor = Color.DarkGoldenrod;
+
+
+    [Category("Appearance")]
+    [DefaultValue(EditorThemeMode.System)]
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Visible)]
+    public EditorThemeMode ThemeMode
+    {
+        get => _themeMode;
+        set
+        {
+            if (_themeMode == value) return;
+            _themeMode = value;
+            ApplyTheme();
+        }
+    }
+
+    public void SetLightTheme() => ThemeMode = EditorThemeMode.Light;
+    public void SetDarkTheme() => ThemeMode = EditorThemeMode.Dark;
+    public void SetSystemTheme() => ThemeMode = EditorThemeMode.System;
+
+
+    private void ApplyTheme(bool rebuildLayout = true)
+    {
+        bool dark = ResolveEffectiveDarkMode();
+        _isDarkThemeEffective = dark;
+
+        if (dark)
+            ApplyDarkPaletteCore();
+        else
+            ApplyLightPaletteCore();
+
+        if (_cellEditor is not null)
+        {
+            _cellEditor.BackColor = _cellEditorBack;
+            _cellEditor.ForeColor = _cellEditorFore;
+        }
+
+        if (!rebuildLayout)
+        {
+            Invalidate();
+            return;
+        }
+
+        if (!TryApplyPendingInitialRefresh())
+        {
+            RebuildLayout();
+            RepositionCellEditor();
+            Invalidate();
+        }
+    }
+
+    // --- Theme state ---
+    private bool _allowAutoThemeChange = true;
+    private bool _isDarkTheme;
+    private bool _systemThemeEventsHooked;
+    
+
+    public event EventHandler<ThemeChangedEventArgs>? ThemeChanged;
+
+    [Category("Appearance")]
+    [DefaultValue(true)]
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Visible)]
+    public bool AllowAutoThemeChange
+    {
+        get => _allowAutoThemeChange;
+        set
+        {
+            if (_allowAutoThemeChange == value) return;
+
+            _allowAutoThemeChange = value;
+
+            if (_allowAutoThemeChange)
+                ApplyThemeFromSystem(raiseEvent: true);
+
+            UpdateSystemThemeSubscription();
+        }
+    }
+
+    [Browsable(false)]
+    public bool IsDarkTheme => _isDarkTheme;
+
+
+    private bool ResolveEffectiveDarkMode()
+    {
+        return _themeMode switch
+        {
+            EditorThemeMode.Dark => true,
+            EditorThemeMode.Light => false,
+            _ => IsDarkColor(Parent?.BackColor ?? SystemColors.Window)
+        };
+    }
+
+    private static bool IsDarkColor(Color c)
+    {
+        // Relative luminance approximation
+        double r = c.R / 255.0;
+        double g = c.G / 255.0;
+        double b = c.B / 255.0;
+        double luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        return luma < 0.5;
+    }
+
+    private void ApplyLightPaletteCore()
+    {
+        BackColor = Color.White;
+        ForeColor = Color.Black;
+
+        _selectionColor = Color.FromArgb(120, 51, 153, 255);
+        _quoteBarColor = Color.Silver;
+        _codeBg = Color.FromArgb(245, 245, 245);
+        _tableHeaderBg = Color.FromArgb(240, 244, 250);
+        _tableCellBg = Color.White;
+        _tableGrid = Color.Gainsboro;
+        _inlineCodeBg = Color.FromArgb(236, 240, 244);
+        _inlineCodeBorder = Color.FromArgb(210, 216, 224);
+
+        _hrColor = Color.Silver;
+        _tableOuterBorderColor = Color.Silver;
+        _tableDraftBg = Color.FromArgb(255, 252, 242);
+        _tableDraftBorder = Color.FromArgb(230, 190, 120);
+        _tableDraftHint = Color.DarkGoldenrod;
+
+        _cellEditorBack = Color.White;
+        _cellEditorFore = Color.Black;
+    }
+
+    private void ApplyDarkPaletteCore()
+    {
+        BackColor = Color.FromArgb(30, 32, 36);
+        ForeColor = Color.FromArgb(232, 235, 241);
+
+        _selectionColor = Color.FromArgb(120, 76, 151, 255);
+        _quoteBarColor = Color.FromArgb(118, 125, 136);
+        _codeBg = Color.FromArgb(42, 45, 52);
+        _tableHeaderBg = Color.FromArgb(52, 57, 66);
+        _tableCellBg = Color.FromArgb(38, 41, 48);
+        _tableGrid = Color.FromArgb(82, 88, 99);
+        _inlineCodeBg = Color.FromArgb(56, 61, 72);
+        _inlineCodeBorder = Color.FromArgb(98, 106, 120);
+
+        _hrColor = Color.FromArgb(110, 116, 126);
+        _tableOuterBorderColor = Color.FromArgb(132, 138, 148);
+        _tableDraftBg = Color.FromArgb(62, 56, 44);
+        _tableDraftBorder = Color.FromArgb(164, 136, 82);
+        _tableDraftHint = Color.FromArgb(236, 198, 118);
+
+        _cellEditorBack = Color.FromArgb(43, 47, 56);
+        _cellEditorFore = ForeColor;
+    }
+
+    private void EnsureSystemThemeSync()
+    {
+        if (_themeMode != EditorThemeMode.System)
+            return;
+
+        bool shouldBeDark = ResolveEffectiveDarkMode();
+        if (shouldBeDark != _isDarkThemeEffective)
+            ApplyTheme(rebuildLayout: false);
+    }
+
+
+    [Browsable(false)]
+    public bool EffectiveDarkMode => _isDarkThemeEffective;
+
 
     private static readonly StringFormat DrawStringFormat = new(StringFormat.GenericTypographic)
     {
@@ -91,49 +528,94 @@ public sealed class MarkdownGdiEditor : ScrollableControl
         Color TitleColor,
         string Icon);
 
-    private static AdmonitionPalette GetAdmonitionPalette(AdmonitionKind kind) => kind switch
+    private AdmonitionPalette GetAdmonitionPalette(AdmonitionKind kind)
     {
-        AdmonitionKind.Note => new(
-            Color.FromArgb(41, 128, 185),
-            Color.FromArgb(242, 248, 255),
-            Color.FromArgb(189, 222, 246),
-            Color.FromArgb(26, 83, 121),
-            "ⓘ"),
-        AdmonitionKind.Tip => new(
-            Color.FromArgb(39, 174, 96),
-            Color.FromArgb(240, 252, 245),
-            Color.FromArgb(183, 232, 202),
-            Color.FromArgb(24, 108, 60),
-            "💡"),
-        AdmonitionKind.Important => new(
-            Color.FromArgb(142, 68, 173),
-            Color.FromArgb(248, 242, 252),
-            Color.FromArgb(224, 201, 238),
-            Color.FromArgb(90, 40, 112),
-            "❗"),
-        AdmonitionKind.Warning => new(
-            Color.FromArgb(243, 156, 18),
-            Color.FromArgb(255, 249, 236),
-            Color.FromArgb(245, 216, 164),
-            Color.FromArgb(140, 88, 10),
-            "⚠"),
-        AdmonitionKind.Caution => new(
-            Color.FromArgb(231, 76, 60),
-            Color.FromArgb(255, 242, 240),
-            Color.FromArgb(244, 196, 190),
-            Color.FromArgb(138, 41, 31),
-            "⛔"),
-        _ => new(
-            Color.Silver,
-            Color.White,
-            Color.Gainsboro,
-            Color.Gray,
-            string.Empty)
-    };
+        if (!_isDarkTheme)
+        {
+            return kind switch
+            {
+                AdmonitionKind.Note => new(
+                    Color.FromArgb(41, 128, 185),
+                    Color.FromArgb(242, 248, 255),
+                    Color.FromArgb(189, 222, 246),
+                    Color.FromArgb(26, 83, 121),
+                    "ⓘ"),
+                AdmonitionKind.Tip => new(
+                    Color.FromArgb(39, 174, 96),
+                    Color.FromArgb(240, 252, 245),
+                    Color.FromArgb(183, 232, 202),
+                    Color.FromArgb(24, 108, 60),
+                    "💡"),
+                AdmonitionKind.Important => new(
+                    Color.FromArgb(142, 68, 173),
+                    Color.FromArgb(248, 242, 252),
+                    Color.FromArgb(224, 201, 238),
+                    Color.FromArgb(90, 40, 112),
+                    "❗"),
+                AdmonitionKind.Warning => new(
+                    Color.FromArgb(243, 156, 18),
+                    Color.FromArgb(255, 249, 236),
+                    Color.FromArgb(245, 216, 164),
+                    Color.FromArgb(140, 88, 10),
+                    "⚠"),
+                AdmonitionKind.Caution => new(
+                    Color.FromArgb(231, 76, 60),
+                    Color.FromArgb(255, 242, 240),
+                    Color.FromArgb(244, 196, 190),
+                    Color.FromArgb(138, 41, 31),
+                    "⛔"),
+                _ => new(Color.Silver, Color.White, Color.Gainsboro, Color.Gray, string.Empty)
+            };
+        }
+
+        // Dark palettes
+        return kind switch
+        {
+            AdmonitionKind.Note => new(
+                Color.FromArgb(88, 166, 255),
+                Color.FromArgb(34, 46, 61),
+                Color.FromArgb(58, 94, 132),
+                Color.FromArgb(180, 220, 255),
+                "ⓘ"),
+            AdmonitionKind.Tip => new(
+                Color.FromArgb(76, 175, 122),
+                Color.FromArgb(33, 52, 43),
+                Color.FromArgb(55, 96, 76),
+                Color.FromArgb(175, 230, 196),
+                "💡"),
+            AdmonitionKind.Important => new(
+                Color.FromArgb(170, 124, 220),
+                Color.FromArgb(50, 39, 63),
+                Color.FromArgb(94, 72, 120),
+                Color.FromArgb(220, 198, 244),
+                "❗"),
+            AdmonitionKind.Warning => new(
+                Color.FromArgb(242, 176, 73),
+                Color.FromArgb(61, 51, 34),
+                Color.FromArgb(118, 95, 57),
+                Color.FromArgb(255, 222, 160),
+                "⚠"),
+            AdmonitionKind.Caution => new(
+                Color.FromArgb(232, 114, 102),
+                Color.FromArgb(63, 39, 37),
+                Color.FromArgb(120, 71, 66),
+                Color.FromArgb(255, 196, 190),
+                "⛔"),
+            _ => new(
+                Color.FromArgb(110, 118, 130),
+                Color.FromArgb(36, 39, 46),
+                Color.FromArgb(74, 79, 89),
+                Color.FromArgb(220, 220, 220),
+                string.Empty)
+        };
+    }
 
     public event EventHandler<MarkdownChangedEventArgs>? MarkdownChanged;
 
+    [Category("Data")]
+    [Localizable(true)]
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Visible)]
+    [Editor(typeof(System.ComponentModel.Design.MultilineStringEditor), typeof(UITypeEditor))]
     public string Markdown
     {
         get => _doc.ToMarkdown();
@@ -148,7 +630,6 @@ public sealed class MarkdownGdiEditor : ScrollableControl
             _rawCodeFenceStartLine = null;
 
             _state.Restore(new MarkdownPosition(0, 0), null, _doc);
-
             _undo.Clear();
             _redo.Clear();
 
@@ -157,6 +638,92 @@ public sealed class MarkdownGdiEditor : ScrollableControl
             Invalidate();
         }
     }
+
+    /// <summary>
+    /// Hidden from designer/property grid. Keep Text mapped to Markdown for compatibility.
+    /// </summary>
+    [Browsable(false)]
+    [EditorBrowsable(EditorBrowsableState.Never)]
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    [Bindable(false)]
+    [AllowNull] // wichtig für CS8765 (Setter akzeptiert null wie im Basistyp)
+    public override string Text
+    {
+        get => Markdown;
+        set => Markdown = value ?? string.Empty;
+    }
+
+
+    public override void ResetText()
+    {
+        Markdown = string.Empty;
+    }
+
+    // verhindert Designer-Serialisierung von Text zusätzlich
+    private bool ShouldSerializeText() => false;
+
+    // Designer-Serialization-Helfer
+    private bool ShouldSerializeMarkdown() => !string.IsNullOrEmpty(Markdown);
+    private void ResetMarkdown() => Markdown = string.Empty;
+
+    void ISupportInitialize.BeginInit()
+    {
+        _isInitializing = true;
+    }
+
+    void ISupportInitialize.EndInit()
+    {
+        _isInitializing = false;
+        _pendingInitialRefresh = true;
+        TryApplyPendingInitialRefresh();
+    }
+
+    private void SetMarkdownCore(string? value, bool resetUndoStacks)
+    {
+        EndCellEdit(discard: false, move: CellMove.None);
+
+        _doc.LoadMarkdown(value ?? string.Empty);
+        EnsureTrailingEditableLineAfterTerminalTable();
+
+        _rawTableStartLines.Clear();
+        _rawCodeFenceStartLine = null;
+
+        _state.Restore(new MarkdownPosition(0, 0), null, _doc);
+
+        if (resetUndoStacks)
+        {
+            _undo.Clear();
+            _redo.Clear();
+        }
+
+        _pendingInitialRefresh = true;
+
+        if (!_isInitializing)
+        {
+            if (!TryApplyPendingInitialRefresh())
+                Invalidate();
+        }
+    }
+
+    private bool CanApplyInitialLayout()
+        => IsHandleCreated && ClientSize.Width > 0 && ClientSize.Height > 0;
+
+    private bool TryApplyPendingInitialRefresh()
+    {
+        if (!_pendingInitialRefresh) return false;
+        if (_isInitializing) return false;
+        if (!CanApplyInitialLayout()) return false;
+
+        _pendingInitialRefresh = false;
+
+        RebuildLayout();
+        NormalizeCaretOutOfTables();
+        RepositionCellEditor();
+        Invalidate(new Rectangle(Point.Empty, ClientSize), invalidateChildren: false);
+
+        return true;
+    }
+
 
     public MarkdownGdiEditor()
     {
@@ -169,14 +736,18 @@ public sealed class MarkdownGdiEditor : ScrollableControl
         DoubleBuffered = true;
         TabStop = true;
         AutoScroll = true;
-        BackColor = Color.White;
-        ForeColor = Color.Black;
 
         _boldFont = new Font(Font, FontStyle.Bold);
         _monoFont = CreateMonoFont(Font.Size);
 
         _doc.LoadMarkdown(string.Empty);
-        RebuildLayout();
+        _pendingInitialRefresh = true;
+
+        // Initiale Theme-Anwendung (ohne Event)
+        if (!IsInDesigner)
+            ApplyThemeFromSystem(raiseEvent: false);
+        else
+            ApplyTheme(darkTheme: false, raiseEvent: false);
 
         _caretTimer = new System.Windows.Forms.Timer { Interval = 500 };
         _caretTimer.Tick += (_, _) =>
@@ -189,18 +760,61 @@ public sealed class MarkdownGdiEditor : ScrollableControl
         Cursor = Cursors.IBeam;
     }
 
+
     protected override void Dispose(bool disposing)
     {
         if (disposing)
         {
+            UnsubscribeSystemThemeEvents();
+
             _caretTimer.Dispose();
             _boldFont.Dispose();
             _monoFont.Dispose();
             ClearHeadingFontCache();
             _cellEditor?.Dispose();
         }
+
         base.Dispose(disposing);
     }
+
+
+    protected override void OnHandleCreated(EventArgs e)
+    {
+        base.OnHandleCreated(e);
+
+        if (!IsInDesigner)
+        {
+            if (AllowAutoThemeChange)
+                ApplyThemeFromSystem(raiseEvent: false);
+
+            UpdateSystemThemeSubscription();
+        }
+
+        TryApplyPendingInitialRefresh();
+    }
+
+    protected override void OnHandleDestroyed(EventArgs e)
+    {
+        if (!RecreatingHandle)
+            UnsubscribeSystemThemeEvents();
+
+        base.OnHandleDestroyed(e);
+    }
+
+
+    protected override void OnCreateControl()
+    {
+        base.OnCreateControl();
+        TryApplyPendingInitialRefresh();
+    }
+
+    protected override void OnVisibleChanged(EventArgs e)
+    {
+        base.OnVisibleChanged(e);
+        if (Visible)
+            TryApplyPendingInitialRefresh();
+    }
+
 
     protected override bool IsInputKey(Keys keyData)
     {
@@ -222,18 +836,27 @@ public sealed class MarkdownGdiEditor : ScrollableControl
         _boldFont = new Font(Font, FontStyle.Bold);
         _monoFont = CreateMonoFont(Font.Size);
 
-        RebuildLayout();
-        RepositionCellEditor();
-        Invalidate();
+        if (!TryApplyPendingInitialRefresh())
+        {
+            RebuildLayout();
+            RepositionCellEditor();
+            Invalidate();
+        }
     }
+
 
     protected override void OnResize(EventArgs e)
     {
         base.OnResize(e);
-        RebuildLayout();
-        RepositionCellEditor();
-        Invalidate();
+
+        if (!TryApplyPendingInitialRefresh())
+        {
+            RebuildLayout();
+            RepositionCellEditor();
+            Invalidate();
+        }
     }
+
 
     protected override void OnScroll(ScrollEventArgs se)
     {
@@ -1171,6 +1794,8 @@ public sealed class MarkdownGdiEditor : ScrollableControl
 
     protected override void OnPaint(PaintEventArgs e)
     {
+        EnsureSystemThemeSync();
+        TryApplyPendingInitialRefresh();
         base.OnPaint(e);
 
         e.Graphics.ResetTransform();
@@ -1186,18 +1811,46 @@ public sealed class MarkdownGdiEditor : ScrollableControl
 
         e.Graphics.SetClip(viewport);
 
-        // Erst Inhalt zeichnen
+        // Draw content first
         foreach (var line in _layout.GetVisibleLines(viewport))
             DrawLine(e.Graphics, line);
 
         foreach (var table in _layout.GetVisibleTables(viewport))
             DrawTable(e.Graphics, table);
 
-        // Dann Selection als Overlay (auch für visuelle Elemente)
+        // Then selection overlay
         DrawSelection(e.Graphics, viewport);
 
         if (Focused && _caretVisible && _cellEditor is null)
             DrawCaret(e.Graphics);
+    }
+
+    protected override void OnSystemColorsChanged(EventArgs e)
+    {
+        base.OnSystemColorsChanged(e);
+        if (_themeMode == EditorThemeMode.System)
+            ApplyTheme();
+    }
+
+    protected override void OnParentBackColorChanged(EventArgs e)
+    {
+        base.OnParentBackColorChanged(e);
+        if (_themeMode == EditorThemeMode.System)
+            ApplyTheme();
+    }
+
+    protected override void OnParentForeColorChanged(EventArgs e)
+    {
+        base.OnParentForeColorChanged(e);
+        if (_themeMode == EditorThemeMode.System)
+            ApplyTheme();
+    }
+
+    protected override void OnParentChanged(EventArgs e)
+    {
+        base.OnParentChanged(e);
+        if (_themeMode == EditorThemeMode.System)
+            ApplyTheme();
     }
 
 
@@ -1209,7 +1862,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl
             int x2 = Math.Max(line.TextX + 64, AutoScrollMinSize.Width - 16);
             int y = line.Bounds.Top + (line.Bounds.Height / 2);
 
-            using var p = new Pen(Color.Silver, 1f);
+            using var p = new Pen(_horizontalRuleColor, 1f);
             g.DrawLine(p, x1, y, x2, y);
             return;
         }
@@ -1244,19 +1897,19 @@ public sealed class MarkdownGdiEditor : ScrollableControl
         PendingTableDraftInfo draft = GetPendingTableDraftInfo(line.SourceLine);
         if (draft.IsPending)
         {
-            using var draftBg = new SolidBrush(Color.FromArgb(255, 252, 242));
+            using var draftBg = new SolidBrush(_tableDraftBg);
             int w = Math.Max(line.TextWidth + 10, 56);
             var draftRect = new Rectangle(line.TextX - 5, line.Bounds.Top, w, line.Bounds.Height);
             g.FillRectangle(draftBg, draftRect);
 
-            using var draftBorder = new Pen(Color.FromArgb(230, 190, 120), 1f);
+            using var draftBorder = new Pen(_tableDraftBorder, 1f);
             g.DrawRectangle(draftBorder, draftRect);
 
             if (draft.Role == PendingTableDraftRole.Delimiter)
             {
                 string hint = $"Table draft: {draft.CurrentCols}/{draft.ExpectedCols}";
                 using var hintFont = new Font(Font, FontStyle.Italic);
-                DrawTextGdiPlus(g, hint, hintFont, new Point(line.TextX + w + 8, line.Bounds.Top + 1), Color.DarkGoldenrod);
+                DrawTextGdiPlus(g, hint, hintFont, new Point(line.TextX + w + 8, line.Bounds.Top + 1), _tableDraftHintColor);
             }
         }
 
@@ -1291,13 +1944,6 @@ public sealed class MarkdownGdiEditor : ScrollableControl
         {
             DrawInlineRuns(g, line, new Point(line.TextX, line.Bounds.Top + 1));
         }
-
-        /*if (line.Kind == MarkdownBlockKind.Heading && line.HeadingLevel <= 2 && !string.IsNullOrEmpty(display))
-        {
-            int w = Math.Max(1, MeasureVisualPrefix(line, line.Projection.DisplayText.Length));
-            using var p = new Pen(Color.Gainsboro, 1f);
-            g.DrawLine(p, line.TextX, line.Bounds.Bottom - 1, line.TextX + w, line.Bounds.Bottom - 1);
-        }*/
     }
 
     private void DrawTable(Graphics g, TableLayout table)
@@ -1344,7 +1990,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl
             }
         }
 
-        using var outer = new Pen(Color.Silver, 1.2f);
+        using var outer = new Pen(_tableOuterBorderColor, 1.2f);
         g.DrawRectangle(outer, table.Bounds);
     }
 
@@ -2453,7 +3099,9 @@ public sealed class MarkdownGdiEditor : ScrollableControl
             Multiline = false,
             Text = text,
             Bounds = Rectangle.Inflate(ContentToClient(cellRectContent), -4, -4),
-            Font = Font
+            Font = Font,
+            BackColor = _tableCellBg,
+            ForeColor = ForeColor
         };
 
         _cellEditor.KeyDown += CellEditor_KeyDown;
