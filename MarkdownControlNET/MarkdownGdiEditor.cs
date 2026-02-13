@@ -9,34 +9,6 @@ using Microsoft.Win32;
 
 namespace MarkdownGdi;
 
-public sealed class MarkdownChangedEventArgs : EventArgs
-{
-    public string Markdown { get; }
-    public MarkdownChangedEventArgs(string markdown) => Markdown = markdown;
-}
-
-
-public sealed class ThemeChangedEventArgs : EventArgs
-{
-    public ThemeChangedEventArgs(bool oldIsDarkTheme, bool newIsDarkTheme)
-    {
-        OldIsDarkTheme = oldIsDarkTheme;
-        NewIsDarkTheme = newIsDarkTheme;
-    }
-
-    public bool OldIsDarkTheme { get; }
-    public bool NewIsDarkTheme { get; }
-}
-
-
-
-public enum EditorThemeMode
-{
-    System,
-    Light,
-    Dark
-}
-
 
 public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
 {
@@ -671,6 +643,121 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         _isInitializing = true;
     }
 
+    // NEW: find state
+    private string? _lastFindQuery;
+    private FindOptions _lastFindOptions = new();
+    private int _lastFindStartGlobal = -1;
+    private int _lastFindLength = 0;
+
+    // NEW: Host-UI kann darauf reagieren und eigenen Find-Dialog anzeigen
+    public event EventHandler<FindRequestedEventArgs>? FindRequested;
+
+
+    [Browsable(false)]
+    public bool CanCopy => _cellEditor is not null ? _cellEditor.SelectionLength > 0 : _state.HasSelection;
+
+    [Browsable(false)]
+    public bool CanCut => CanCopy;
+
+    [Browsable(false)]
+    public bool CanPaste => TryClipboardContainsText();
+
+    [Browsable(false)]
+    public bool CanSelectAll => _cellEditor is not null ? _cellEditor.TextLength > 0 : _doc.LineCount > 0;
+
+    [Browsable(false)]
+    public bool CanFindNext => !string.IsNullOrEmpty(_lastFindQuery);
+
+    public void SelectAllCommand()
+    {
+        if (_cellEditor is not null)
+        {
+            _cellEditor.SelectAll();
+            return;
+        }
+
+        _state.SelectAll(_doc);
+        NormalizeCaretOutOfTables();
+        ResetCaretBlink();
+        EnsureCaretVisible();
+        Invalidate();
+    }
+
+    public void CopyCommand()
+    {
+        if (_cellEditor is not null)
+        {
+            if (_cellEditor.SelectionLength > 0)
+                _cellEditor.Copy();
+            return;
+        }
+
+        string sel = _state.GetSelectedText(_doc);
+        if (!string.IsNullOrEmpty(sel))
+            TryClipboardSetText(sel);
+    }
+
+    public void CutCommand()
+    {
+        if (_cellEditor is not null)
+        {
+            if (_cellEditor.SelectionLength > 0)
+                _cellEditor.Cut();
+            return;
+        }
+
+        if (!_state.HasSelection) return;
+
+        string sel = _state.GetSelectedText(_doc);
+        if (string.IsNullOrEmpty(sel)) return;
+        if (!TryClipboardSetText(sel)) return; // wenn Clipboard gesperrt: nichts löschen
+
+        ApplyDocumentEdit(() => _state.DeleteSelection(_doc));
+    }
+
+    public void PasteCommand()
+    {
+        if (_cellEditor is not null)
+        {
+            _cellEditor.Paste();
+            return;
+        }
+
+        if (!TryClipboardGetText(out string text) || string.IsNullOrEmpty(text))
+            return;
+
+        ApplyDocumentEdit(() => _state.InsertText(_doc, text));
+    }
+
+    /// <summary>
+    /// Öffnet keinen Dialog selbst, sondern signalisiert dem Host (Form), dass Find angefordert wurde.
+    /// </summary>
+    public void RequestFind()
+    {
+        FindRequested?.Invoke(this, new FindRequestedEventArgs(_lastFindQuery, _lastFindOptions));
+    }
+
+    /// <summary>
+    /// Startet eine neue Suche ab aktueller Caret-Position.
+    /// </summary>
+    public bool Find(string query, FindOptions? options = null)
+    {
+        options ??= new FindOptions();
+        return FindCore(query, options, continueFromLastMatch: false);
+    }
+
+    /// <summary>
+    /// Sucht den nächsten Treffer mit den letzten Suchparametern.
+    /// </summary>
+    public bool FindNext()
+    {
+        if (string.IsNullOrEmpty(_lastFindQuery))
+            return false;
+
+        return FindCore(_lastFindQuery, _lastFindOptions, continueFromLastMatch: true);
+    }
+
+
     void ISupportInitialize.EndInit()
     {
         _isInitializing = false;
@@ -1111,12 +1198,22 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         base.OnKeyDown(e);
         if (_cellEditor is not null) return;
 
-        if (HandleShortcuts(e))
+        if (_cellEditor is null && e.KeyCode == Keys.F3 && !e.Control && !e.Alt)
         {
+            FindNext();
             e.Handled = true;
             e.SuppressKeyPress = true;
             return;
         }
+
+
+
+        /*if (HandleShortcuts(e))
+        {
+            e.Handled = true;
+            e.SuppressKeyPress = true;
+            return;
+        }*/
 
         if (e.Control && e.KeyCode == Keys.Enter)
         {
@@ -1195,6 +1292,249 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         {
             e.Handled = true;
             e.SuppressKeyPress = true;
+        }
+    }
+    private bool FindCore(string query, FindOptions options, bool continueFromLastMatch)
+    {
+        EndCellEdit(discard: false, move: CellMove.None);
+
+        if (string.IsNullOrEmpty(query))
+            return false;
+
+        string needle = NormalizeFindNeedle(query, options.InterpretEscapeSequences);
+        if (string.IsNullOrEmpty(needle))
+            return false;
+
+        string text = _doc.ToMarkdown();
+        if (string.IsNullOrEmpty(text))
+            return false;
+
+        bool sameSearch =
+            string.Equals(_lastFindQuery, query, StringComparison.Ordinal) &&
+            _lastFindOptions == options;
+
+        int caretGlobal = ToGlobalIndex(_state.Caret);
+
+        int startGlobal =
+            (continueFromLastMatch && sameSearch && _lastFindStartGlobal >= 0)
+                ? _lastFindStartGlobal + Math.Max(1, _lastFindLength)
+                : caretGlobal;
+
+        startGlobal = Math.Clamp(startGlobal, 0, text.Length);
+
+        StringComparison cmp = options.CaseSensitive
+            ? StringComparison.Ordinal
+            : StringComparison.OrdinalIgnoreCase;
+
+        if (!TryFindMatch(text, needle, startGlobal, cmp, options, out int hit))
+            return false;
+
+        SelectMatchByGlobalRange(hit, hit + needle.Length, text.Length);
+
+        _lastFindQuery = query;
+        _lastFindOptions = options;
+        _lastFindStartGlobal = hit;
+        _lastFindLength = needle.Length;
+
+        return true;
+    }
+
+    private static string NormalizeFindNeedle(string query, bool interpretEscapes)
+    {
+        if (!interpretEscapes) return query;
+
+        try
+        {
+            return Regex.Unescape(query);
+        }
+        catch
+        {
+            return query;
+        }
+    }
+
+    private static bool TryFindMatch(
+        string text,
+        string needle,
+        int startIndex,
+        StringComparison comparison,
+        FindOptions options,
+        out int hit)
+    {
+        hit = -1;
+        if (string.IsNullOrEmpty(needle)) return false;
+
+        if (TryFindMatchInRange(text, needle, startIndex, text.Length, comparison, options, out hit))
+            return true;
+
+        if (options.WrapAround && startIndex > 0)
+            return TryFindMatchInRange(text, needle, 0, startIndex, comparison, options, out hit);
+
+        return false;
+    }
+
+    private static bool TryFindMatchInRange(
+        string text,
+        string needle,
+        int rangeStart,
+        int rangeEndExclusive,
+        StringComparison comparison,
+        FindOptions options,
+        out int hit)
+    {
+        hit = -1;
+
+        int i = Math.Max(0, rangeStart);
+        int maxStart = rangeEndExclusive - needle.Length;
+        if (maxStart < i) return false;
+
+        while (i <= maxStart)
+        {
+            int idx = text.IndexOf(needle, i, comparison);
+            if (idx < 0 || idx + needle.Length > rangeEndExclusive)
+                return false;
+
+            if (IsAcceptedMatch(text, idx, needle.Length, options))
+            {
+                hit = idx;
+                return true;
+            }
+
+            i = idx + 1;
+        }
+
+        return false;
+    }
+
+    private static bool IsAcceptedMatch(string text, int start, int length, FindOptions options)
+    {
+        // Whole word
+        if (options.WholeWord)
+        {
+            bool leftOk = start == 0 || !IsWordChar(text[start - 1]);
+            int after = start + length;
+            bool rightOk = after >= text.Length || !IsWordChar(text[after]);
+
+            if (!leftOk || !rightOk)
+                return false;
+        }
+
+        // Escaped / unescaped filter
+        if (options.EscapeMode != EscapeSearchMode.Any)
+        {
+            bool escaped = IsEscapedAt(text, start);
+
+            if (options.EscapeMode == EscapeSearchMode.OnlyEscaped && !escaped)
+                return false;
+
+            if (options.EscapeMode == EscapeSearchMode.OnlyUnescaped && escaped)
+                return false;
+        }
+
+        return true;
+    }
+
+    private static bool IsWordChar(char c) => char.IsLetterOrDigit(c) || c == '_';
+
+    private static bool IsEscapedAt(string text, int index)
+    {
+        int bs = 0;
+        for (int i = index - 1; i >= 0 && text[i] == '\\'; i--)
+            bs++;
+
+        return (bs % 2) == 1;
+    }
+
+    private int ToGlobalIndex(MarkdownPosition pos)
+    {
+        if (_doc.LineCount <= 0) return 0;
+
+        int line = Math.Clamp(pos.Line, 0, _doc.LineCount - 1);
+        int col = Math.Clamp(pos.Column, 0, _doc.GetLineLength(line));
+
+        int idx = 0;
+        for (int i = 0; i < line; i++)
+            idx += _doc.GetLineLength(i) + 1; // '\n'
+
+        return idx + col;
+    }
+
+    private MarkdownPosition GlobalToPosition(int globalIndex, int totalLength)
+    {
+        if (_doc.LineCount <= 0)
+            return new MarkdownPosition(0, 0);
+
+        int idx = Math.Clamp(globalIndex, 0, totalLength);
+        int running = 0;
+
+        for (int line = 0; line < _doc.LineCount; line++)
+        {
+            int len = _doc.GetLineLength(line);
+            int lineStart = running;
+            int lineEnd = lineStart + len; // Caret darf am Line-End stehen
+
+            if (idx <= lineEnd)
+                return new MarkdownPosition(line, idx - lineStart);
+
+            running = lineEnd + 1; // '\n'
+        }
+
+        int last = _doc.LineCount - 1;
+        return new MarkdownPosition(last, _doc.GetLineLength(last));
+    }
+
+    private void SelectMatchByGlobalRange(int start, int end, int totalLength)
+    {
+        start = Math.Clamp(start, 0, totalLength);
+        end = Math.Clamp(end, start, totalLength);
+
+        MarkdownPosition s = GlobalToPosition(start, totalLength);
+        MarkdownPosition e = GlobalToPosition(end, totalLength);
+
+        _state.Restore(e, s, _doc);
+
+        RebuildLayout();
+        NormalizeCaretOutOfTables();
+        ResetCaretBlink();
+        EnsureCaretVisible();
+        Invalidate();
+    }
+
+    private static bool TryClipboardContainsText()
+    {
+        try { return Clipboard.ContainsText(TextDataFormat.Text); }
+        catch { return false; }
+    }
+
+    private static bool TryClipboardGetText(out string text)
+    {
+        text = string.Empty;
+        try
+        {
+            if (!Clipboard.ContainsText(TextDataFormat.Text))
+                return false;
+
+            text = Clipboard.GetText(TextDataFormat.Text) ?? string.Empty;
+            return !string.IsNullOrEmpty(text);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static bool TryClipboardSetText(string text)
+    {
+        if (string.IsNullOrEmpty(text)) return false;
+
+        try
+        {
+            Clipboard.SetText(text, TextDataFormat.Text);
+            return true;
+        }
+        catch
+        {
+            return false;
         }
     }
 
@@ -2486,39 +2826,30 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         g.DrawLine(p, x, line.Bounds.Top + 2, x, line.Bounds.Bottom - 2);
     }
 
-    private bool HandleShortcuts(KeyEventArgs e)
+    /*private bool HandleShortcuts(KeyEventArgs e)
     {
         if (!e.Control) return false;
 
         switch (e.KeyCode)
         {
             case Keys.A:
-                _state.SelectAll(_doc);
-                NormalizeCaretOutOfTables();
-                ResetCaretBlink();
-                EnsureCaretVisible();
-                Invalidate();
+                SelectAllCommand();
                 return true;
 
             case Keys.C:
-                CopySelection();
+                CopyCommand();
                 return true;
 
             case Keys.X:
-                if (_state.HasSelection)
-                {
-                    CopySelection();
-                    ApplyDocumentEdit(() => _state.DeleteSelection(_doc));
-                }
+                CutCommand();
                 return true;
 
             case Keys.V:
-                if (Clipboard.ContainsText())
-                {
-                    string t = Clipboard.GetText(TextDataFormat.Text);
-                    if (!string.IsNullOrEmpty(t))
-                        ApplyDocumentEdit(() => _state.InsertText(_doc, t));
-                }
+                PasteCommand();
+                return true;
+
+            case Keys.F:
+                RequestFind();   // Host zeigt Find-UI (oder direkt Find(...) aufrufen)
                 return true;
 
             case Keys.Z:
@@ -2531,7 +2862,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         }
 
         return false;
-    }
+    }*/
 
     private bool HandleQuoteStructuralKeys(KeyEventArgs e)
     {
