@@ -76,6 +76,14 @@ public sealed class MarkdownGdiEditor : ScrollableControl
         LineAlignment = StringAlignment.Near
     };
 
+    private static readonly StringFormat MeasureStringFormat = new(StringFormat.GenericTypographic)
+    {
+        FormatFlags = StringFormatFlags.NoWrap | StringFormatFlags.MeasureTrailingSpaces,
+        Trimming = StringTrimming.None,
+        Alignment = StringAlignment.Near,
+        LineAlignment = StringAlignment.Near
+    };
+
     private readonly record struct AdmonitionPalette(
         Color Bar,
         Color Background,
@@ -1475,7 +1483,12 @@ public sealed class MarkdownGdiEditor : ScrollableControl
     private static int MeasureWidth(string text, Font font)
     {
         if (string.IsNullOrEmpty(text)) return 0;
-        return TextRenderer.MeasureText(text, font, new Size(int.MaxValue, int.MaxValue), MeasureFlags).Width;
+
+        using var bmp = new Bitmap(1, 1);
+        using var g = Graphics.FromImage(bmp);
+
+        var size = g.MeasureString(text, font, int.MaxValue, MeasureStringFormat);
+        return (int)Math.Ceiling(size.Width);
     }
 
     private static void DrawTextGdiPlus(Graphics g, string text, Font font, Point pt, Color color)
@@ -2031,10 +2044,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl
 
         if (line.InlineRuns is null || line.InlineRuns.Count == 0)
         {
-            int widthSimple = 0;
-            for (int i = 0; i < visualCols; i++)
-                widthSimple += MeasureWidth(display[i].ToString(), baseFont);
-            return widthSimple;
+            return MeasureWidth(display[..visualCols], baseFont);
         }
 
         int remaining = visualCols;
