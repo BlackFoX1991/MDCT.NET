@@ -1,6 +1,4 @@
-using MarkdownEditor;
-
-namespace MarkdownStudio
+namespace MarkdownPad
 {
     internal static class Program
     {
@@ -13,7 +11,7 @@ namespace MarkdownStudio
             // To customize application configuration such as set high DPI settings or default font,
             // see https://aka.ms/applicationconfiguration.
             ApplicationConfiguration.Initialize();
-            Application.Run(new mkEditor());
+            Application.Run(new frmMain());
         }
     }
 }
