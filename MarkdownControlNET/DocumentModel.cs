@@ -6,10 +6,14 @@ namespace MarkdownGdi;
 public sealed class DocumentModel
 {
     private readonly List<string> _lines = new() { string.Empty };
+    private string? _cachedMarkdown;
+    private int[]? _lineStartOffsets;
+    private int _version;
 
     public IReadOnlyList<string> Lines => _lines;
     public IReadOnlyList<MarkdownBlock> Blocks { get; private set; } = Array.Empty<MarkdownBlock>();
     public int LineCount => _lines.Count;
+    public int Version => _version;
 
     public void LoadMarkdown(string markdown)
     {
@@ -25,11 +29,16 @@ public sealed class DocumentModel
         else
             _lines.AddRange(split);
 
+        InvalidateCaches();
         EnsureAtLeastOneLine();
         ReparseAll();
     }
 
-    public string ToMarkdown() => string.Join('\n', _lines);
+    public string ToMarkdown()
+    {
+        _cachedMarkdown ??= string.Join('\n', _lines);
+        return _cachedMarkdown;
+    }
 
     public string GetLine(int line)
     {
@@ -68,6 +77,7 @@ public sealed class DocumentModel
         if (parts.Length == 1)
         {
             _lines[pos.Line] = left + parts[0] + right;
+            InvalidateCaches();
             return new MarkdownPosition(pos.Line, pos.Column + parts[0].Length);
         }
 
@@ -79,6 +89,7 @@ public sealed class DocumentModel
             _lines.Insert(insertAt++, parts[i]);
 
         _lines.Insert(insertAt, parts[^1] + right);
+        InvalidateCaches();
 
         // Caret am Ende des eingefügten letzten Teils (vor ehem. right)
         return new MarkdownPosition(pos.Line + parts.Length - 1, parts[^1].Length);
@@ -100,6 +111,7 @@ public sealed class DocumentModel
         {
             string line = _lines[start.Line];
             _lines[start.Line] = line[..start.Column] + line[end.Column..];
+            InvalidateCaches();
             EnsureAtLeastOneLine();
             return;
         }
@@ -113,6 +125,7 @@ public sealed class DocumentModel
         // Entferne alle Zeilen zwischen start.Line+1 bis inkl. end.Line
         int removeCount = end.Line - start.Line;
         _lines.RemoveRange(start.Line + 1, removeCount);
+        InvalidateCaches();
 
         EnsureAtLeastOneLine();
     }
@@ -139,6 +152,7 @@ public sealed class DocumentModel
 
         _lines[prevLine] += _lines[caret.Line];
         _lines.RemoveAt(caret.Line);
+        InvalidateCaches();
 
         EnsureAtLeastOneLine();
         return new MarkdownPosition(prevLine, prevCol);
@@ -165,6 +179,7 @@ public sealed class DocumentModel
         // Merge mit nächster Zeile
         _lines[caret.Line] += _lines[caret.Line + 1];
         _lines.RemoveAt(caret.Line + 1);
+        InvalidateCaches();
 
         EnsureAtLeastOneLine();
         return caret;
@@ -180,6 +195,7 @@ public sealed class DocumentModel
 
         _lines[caret.Line] = left;
         _lines.Insert(caret.Line + 1, right);
+        InvalidateCaches();
 
         return new MarkdownPosition(caret.Line + 1, 0);
     }
@@ -245,10 +261,42 @@ public sealed class DocumentModel
 
         if (newLines is not null && newLines.Count > 0)
             _lines.InsertRange(startLine, newLines);
-        else
-            _lines.Insert(startLine, string.Empty);
+
+        InvalidateCaches();
 
         EnsureAtLeastOneLine();
+    }
+
+    public string[] SnapshotLines() => _lines.ToArray();
+
+    public int GetTotalTextLength() => ToMarkdown().Length;
+
+    public int ToGlobalIndex(MarkdownPosition pos)
+    {
+        if (_lines.Count == 0)
+            return 0;
+
+        pos = ClampPosition(pos);
+        int[] starts = GetLineStartOffsets();
+        return starts[pos.Line] + pos.Column;
+    }
+
+    public MarkdownPosition GlobalToPosition(int globalIndex)
+    {
+        EnsureAtLeastOneLine();
+
+        int totalLength = GetTotalTextLength();
+        int idx = Math.Clamp(globalIndex, 0, totalLength);
+        int[] starts = GetLineStartOffsets();
+
+        int line = Array.BinarySearch(starts, idx);
+        if (line < 0)
+            line = ~line - 1;
+
+        line = Math.Clamp(line, 0, _lines.Count - 1);
+        int col = idx - starts[line];
+        col = Math.Clamp(col, 0, _lines[line].Length);
+        return new MarkdownPosition(line, col);
     }
 
     public void ReparseDirtyBlocks() => ReparseAll();
@@ -262,9 +310,39 @@ public sealed class DocumentModel
     private void EnsureAtLeastOneLine()
     {
         if (_lines.Count == 0)
+        {
             _lines.Add(string.Empty);
+            InvalidateCaches();
+        }
     }
 
     private static string NormalizeLineEndings(string input)
         => input.Replace("\r\n", "\n").Replace('\r', '\n');
+
+    private int[] GetLineStartOffsets()
+    {
+        if (_lineStartOffsets is not null)
+            return _lineStartOffsets;
+
+        var starts = new int[_lines.Count];
+        int offset = 0;
+
+        for (int i = 0; i < _lines.Count; i++)
+        {
+            starts[i] = offset;
+            offset += _lines[i].Length;
+            if (i < _lines.Count - 1)
+                offset++;
+        }
+
+        _lineStartOffsets = starts;
+        return starts;
+    }
+
+    private void InvalidateCaches()
+    {
+        _cachedMarkdown = null;
+        _lineStartOffsets = null;
+        _version++;
+    }
 }

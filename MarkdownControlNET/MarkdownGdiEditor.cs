@@ -1,6 +1,7 @@
 ﻿using System.ComponentModel;
 using System.Diagnostics.CodeAnalysis;
 using System.Drawing.Design;
+using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
 using Microsoft.Win32;
@@ -31,8 +32,8 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
     private readonly HashSet<int> _rawTableStartLines = new();
     private readonly Dictionary<int, Font> _headingFontCache = new();
 
-    private readonly List<EditorSnapshot> _undo = new();
-    private readonly List<EditorSnapshot> _redo = new();
+    private readonly List<UndoRecord> _undo = new();
+    private readonly List<UndoRecord> _redo = new();
 
     private readonly System.Windows.Forms.Timer _caretTimer;
     private bool _caretVisible = true;
@@ -45,12 +46,17 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
     private ActiveTableSession? _activeTable;
     private bool _suppressCellLostFocus;
 
+    private bool _layoutContextInitialized;
+    private int _layoutContextDocumentVersion = -1;
+    private int? _layoutContextRawCodeFenceStart;
+    private int? _layoutContextRawInlineLine;
+    private int _layoutContextRawSourceStart = -1;
+    private int _layoutContextRawSourceEnd = -1;
+    private int[] _layoutContextRawTableStarts = Array.Empty<int>();
+
     private const int MaxUndo = 250;
 
     private int? _rawCodeFenceStartLine;
-
-    private static readonly TextFormatFlags MeasureFlags =
-        TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine;
 
     private static readonly Regex TableDelimiterCellRegex =
         new(@"^:?-{3,}:?$", RegexOptions.Compiled);
@@ -118,34 +124,34 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
 
     public void SetTheme(bool darkTheme)
     {
-        // Manuelles Setzen deaktiviert Auto-Sync bewusst
         AllowAutoThemeChange = false;
-        ApplyTheme(darkTheme, raiseEvent: true);
+        ThemeMode = darkTheme ? EditorThemeMode.Dark : EditorThemeMode.Light;
     }
 
     private bool IsInDesigner
         => LicenseManager.UsageMode == LicenseUsageMode.Designtime || (Site?.DesignMode ?? false);
 
-    private void ApplyThemeFromSystem(bool raiseEvent)
+    private static bool TryReadWindowsAppsUseDarkTheme(out bool darkTheme)
     {
-        bool dark = ReadWindowsAppsUseDarkTheme();
-        ApplyTheme(dark, raiseEvent);
-    }
+        darkTheme = false;
 
-    private static bool ReadWindowsAppsUseDarkTheme()
-    {
         try
         {
             using RegistryKey? key = Registry.CurrentUser.OpenSubKey(
                 @"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize", writable: false);
 
             object? v = key?.GetValue("AppsUseLightTheme");
-            return v switch
+            switch (v)
             {
-                int i => i == 0,   // 0 = dark
-                long l => l == 0L,
-                _ => false         // fallback: light
-            };
+                case int i:
+                    darkTheme = i == 0;
+                    return true;
+                case long l:
+                    darkTheme = l == 0L;
+                    return true;
+                default:
+                    return false;
+            }
         }
         catch
         {
@@ -153,79 +159,26 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         }
     }
 
-    private void ApplyTheme(bool darkTheme, bool raiseEvent)
+    private void RefreshSystemThemePreference()
     {
-        bool old = _isDarkTheme;
-        _isDarkTheme = darkTheme;
-
-        if (darkTheme)
-            ApplyDarkPalette();
-        else
-            ApplyLightPalette();
-
-        if (_cellEditor is not null)
+        if (TryReadWindowsAppsUseDarkTheme(out bool darkTheme))
         {
-            _cellEditor.BackColor = _tableCellBg;
-            _cellEditor.ForeColor = ForeColor;
+            _systemDarkThemeKnown = true;
+            _systemDarkTheme = darkTheme;
         }
-
-        Invalidate(new Rectangle(Point.Empty, ClientSize), invalidateChildren: false);
-
-        if (raiseEvent && old != _isDarkTheme)
-            ThemeChanged?.Invoke(this, new ThemeChangedEventArgs(old, _isDarkTheme));
-    }
-
-    private void ApplyLightPalette()
-    {
-        BackColor = Color.White;
-        ForeColor = Color.Black;
-
-        _selectionColor = Color.FromArgb(120, 51, 153, 255);
-        _quoteBarColor = Color.Silver;
-
-        _codeBg = Color.FromArgb(245, 245, 245);
-        _tableHeaderBg = Color.FromArgb(240, 244, 250);
-        _tableCellBg = Color.White;
-        _tableGrid = Color.Gainsboro;
-
-        _inlineCodeBg = Color.FromArgb(236, 240, 244);
-        _inlineCodeBorder = Color.FromArgb(210, 216, 224);
-
-        _horizontalRuleColor = Color.Silver;
-        _tableOuterBorderColor = Color.Silver;
-
-        _tableDraftBg = Color.FromArgb(255, 252, 242);
-        _tableDraftBorder = Color.FromArgb(230, 190, 120);
-        _tableDraftHintColor = Color.DarkGoldenrod;
-    }
-
-    private void ApplyDarkPalette()
-    {
-        BackColor = Color.FromArgb(30, 30, 30);
-        ForeColor = Color.FromArgb(230, 230, 230);
-
-        _selectionColor = Color.FromArgb(120, 88, 145, 255);
-        _quoteBarColor = Color.FromArgb(110, 118, 130);
-
-        _codeBg = Color.FromArgb(42, 45, 52);
-        _tableHeaderBg = Color.FromArgb(48, 52, 60);
-        _tableCellBg = Color.FromArgb(36, 39, 46);
-        _tableGrid = Color.FromArgb(74, 79, 89);
-
-        _inlineCodeBg = Color.FromArgb(56, 60, 68);
-        _inlineCodeBorder = Color.FromArgb(88, 94, 106);
-
-        _horizontalRuleColor = Color.FromArgb(108, 116, 130);
-        _tableOuterBorderColor = Color.FromArgb(118, 126, 140);
-
-        _tableDraftBg = Color.FromArgb(58, 50, 38);
-        _tableDraftBorder = Color.FromArgb(176, 132, 68);
-        _tableDraftHintColor = Color.FromArgb(226, 191, 128);
+        else
+        {
+            _systemDarkThemeKnown = false;
+            _systemDarkTheme = false;
+        }
     }
 
     private void UpdateSystemThemeSubscription()
     {
-        bool shouldHook = !IsDisposed && !IsInDesigner && AllowAutoThemeChange;
+        bool shouldHook = !IsDisposed
+            && !IsInDesigner
+            && AllowAutoThemeChange
+            && _themeMode == EditorThemeMode.System;
 
         if (shouldHook && !_systemThemeEventsHooked)
         {
@@ -263,7 +216,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
 
     private void OnSystemUserPreferenceChanged(object? sender, UserPreferenceChangedEventArgs e)
     {
-        if (!AllowAutoThemeChange || IsDisposed) return;
+        if (!AllowAutoThemeChange || IsDisposed || _themeMode != EditorThemeMode.System) return;
 
         if (e.Category is not (UserPreferenceCategory.General
                                or UserPreferenceCategory.Color
@@ -272,7 +225,11 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
 
         if (!IsHandleCreated) return;
 
-        void Apply() => ApplyThemeFromSystem(raiseEvent: true);
+        void Apply()
+        {
+            RefreshSystemThemePreference();
+            ApplyTheme(raiseEvent: true);
+        }
 
         try
         {
@@ -302,6 +259,8 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
 
     private EditorThemeMode _themeMode = EditorThemeMode.System;
     private bool _isDarkThemeEffective;
+    private bool _systemDarkThemeKnown;
+    private bool _systemDarkTheme;
 
     private Color _hrColor = Color.Silver;
     private Color _tableOuterBorderColor = Color.Silver;
@@ -310,8 +269,6 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
     private Color _tableDraftHint = Color.DarkGoldenrod;
     private Color _cellEditorBack = Color.White;
     private Color _cellEditorFore = Color.Black;
-    private Color _horizontalRuleColor = Color.Silver;
-    private Color _tableDraftHintColor = Color.DarkGoldenrod;
 
 
     [Category("Appearance")]
@@ -324,6 +281,10 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         {
             if (_themeMode == value) return;
             _themeMode = value;
+            if (_themeMode == EditorThemeMode.System)
+                RefreshSystemThemePreference();
+
+            UpdateSystemThemeSubscription();
             ApplyTheme();
         }
     }
@@ -333,8 +294,9 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
     public void SetSystemTheme() => ThemeMode = EditorThemeMode.System;
 
 
-    private void ApplyTheme(bool rebuildLayout = true)
+    private void ApplyTheme(bool rebuildLayout = true, bool raiseEvent = true)
     {
+        bool old = _isDarkThemeEffective;
         bool dark = ResolveEffectiveDarkMode();
         _isDarkThemeEffective = dark;
 
@@ -352,20 +314,20 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         if (!rebuildLayout)
         {
             Invalidate();
-            return;
         }
-
-        if (!TryApplyPendingInitialRefresh())
+        else if (!TryApplyPendingInitialRefresh())
         {
-            RebuildLayout();
+            RefreshLayoutForCaretContext(force: true);
             RepositionCellEditor();
             Invalidate();
         }
+
+        if (raiseEvent && old != dark)
+            ThemeChanged?.Invoke(this, new ThemeChangedEventArgs(old, dark));
     }
 
     // --- Theme state ---
     private bool _allowAutoThemeChange = true;
-    private bool _isDarkTheme;
     private bool _systemThemeEventsHooked;
     
 
@@ -383,15 +345,18 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
 
             _allowAutoThemeChange = value;
 
-            if (_allowAutoThemeChange)
-                ApplyThemeFromSystem(raiseEvent: true);
-
             UpdateSystemThemeSubscription();
+
+            if (_allowAutoThemeChange && _themeMode == EditorThemeMode.System)
+            {
+                RefreshSystemThemePreference();
+                ApplyTheme();
+            }
         }
     }
 
     [Browsable(false)]
-    public bool IsDarkTheme => _isDarkTheme;
+    public bool IsDarkTheme => _isDarkThemeEffective;
 
 
     private bool ResolveEffectiveDarkMode()
@@ -400,7 +365,9 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         {
             EditorThemeMode.Dark => true,
             EditorThemeMode.Light => false,
-            _ => IsDarkColor(Parent?.BackColor ?? SystemColors.Window)
+            _ => _systemDarkThemeKnown
+                ? _systemDarkTheme
+                : IsDarkColor(Parent?.BackColor ?? SystemColors.Window)
         };
     }
 
@@ -464,7 +431,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
 
     private void EnsureSystemThemeSync()
     {
-        if (_themeMode != EditorThemeMode.System)
+        if (_themeMode != EditorThemeMode.System || !AllowAutoThemeChange)
             return;
 
         bool shouldBeDark = ResolveEffectiveDarkMode();
@@ -502,7 +469,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
 
     private AdmonitionPalette GetAdmonitionPalette(AdmonitionKind kind)
     {
-        if (!_isDarkTheme)
+        if (!_isDarkThemeEffective)
         {
             return kind switch
             {
@@ -605,8 +572,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
             _undo.Clear();
             _redo.Clear();
 
-            RebuildLayout();
-            NormalizeCaretOutOfTables();
+            RefreshLayoutAfterDocumentChange();
             Invalidate();
         }
     }
@@ -666,7 +632,19 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
     public bool CanSelectAll => _cellEditor is not null ? _cellEditor.TextLength > 0 : _doc.LineCount > 0;
 
     [Browsable(false)]
+    public bool CanUndo => _undo.Count > 0;
+
+    [Browsable(false)]
+    public bool CanRedo => _redo.Count > 0;
+
+    [Browsable(false)]
     public bool CanFindNext => !string.IsNullOrEmpty(_lastFindQuery);
+
+    [Browsable(false)]
+    public MarkdownPosition CaretPosition => _state.Caret;
+
+    [Browsable(false)]
+    public bool HasSelection => _cellEditor is not null ? _cellEditor.SelectionLength > 0 : _state.HasSelection;
 
     public void SelectAllCommand()
     {
@@ -677,7 +655,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         }
 
         _state.SelectAll(_doc);
-        NormalizeCaretOutOfTables();
+        RefreshLayoutForCaretContext();
         ResetCaretBlink();
         EnsureCaretVisible();
         Invalidate();
@@ -757,6 +735,10 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         return FindCore(_lastFindQuery, _lastFindOptions, continueFromLastMatch: true);
     }
 
+    public void UndoCommand() => Undo();
+
+    public void RedoCommand() => Redo();
+
 
     void ISupportInitialize.EndInit()
     {
@@ -803,8 +785,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
 
         _pendingInitialRefresh = false;
 
-        RebuildLayout();
-        NormalizeCaretOutOfTables();
+        RefreshLayoutForCaretContext(force: true);
         RepositionCellEditor();
         Invalidate(new Rectangle(Point.Empty, ClientSize), invalidateChildren: false);
 
@@ -830,11 +811,10 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         _doc.LoadMarkdown(string.Empty);
         _pendingInitialRefresh = true;
 
-        // Initiale Theme-Anwendung (ohne Event)
         if (!IsInDesigner)
-            ApplyThemeFromSystem(raiseEvent: false);
-        else
-            ApplyTheme(darkTheme: false, raiseEvent: false);
+            RefreshSystemThemePreference();
+
+        ApplyTheme(rebuildLayout: false, raiseEvent: false);
 
         _caretTimer = new System.Windows.Forms.Timer { Interval = 500 };
         _caretTimer.Tick += (_, _) =>
@@ -871,12 +851,13 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
 
         if (!IsInDesigner)
         {
-            if (AllowAutoThemeChange)
-                ApplyThemeFromSystem(raiseEvent: false);
+            if (_themeMode == EditorThemeMode.System)
+                RefreshSystemThemePreference();
 
             UpdateSystemThemeSubscription();
         }
 
+        ApplyTheme(rebuildLayout: false, raiseEvent: false);
         TryApplyPendingInitialRefresh();
     }
 
@@ -925,7 +906,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
 
         if (!TryApplyPendingInitialRefresh())
         {
-            RebuildLayout();
+            RefreshLayoutForCaretContext(force: true);
             RepositionCellEditor();
             Invalidate();
         }
@@ -938,7 +919,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
 
         if (!TryApplyPendingInitialRefresh())
         {
-            RebuildLayout();
+            RefreshLayoutForCaretContext(force: true);
             RepositionCellEditor();
             Invalidate();
         }
@@ -1010,10 +991,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
 
         _state.SetCaret(pos, shift, _doc);
 
-        // Always rebuild so Raw/Inline source mode follows caret
-        RebuildLayout();
-
-        NormalizeCaretOutOfTables();
+        RefreshLayoutForCaretContext();
 
         ResetCaretBlink();
         EnsureCaretVisible();
@@ -1036,10 +1014,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         var pos = _layout.HitTestText(ClientToContent(e.Location));
         _state.SetCaret(pos, shift: true, _doc);
 
-        // Always rebuild so Raw/Inline source mode follows caret
-        RebuildLayout();
-
-        NormalizeCaretOutOfTables();
+        RefreshLayoutForCaretContext();
 
         ResetCaretBlink();
         EnsureCaretVisible();
@@ -1279,10 +1254,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
 
         if (movedCaret)
         {
-            // Immer neu aufbauen, damit Raw/Inline-Source-Modus dem Caret folgt
-            RebuildLayout();
-
-            NormalizeCaretOutOfTables();
+            RefreshLayoutForCaretContext();
             ResetCaretBlink();
             EnsureCaretVisible();
             Invalidate();
@@ -1313,7 +1285,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
             string.Equals(_lastFindQuery, query, StringComparison.Ordinal) &&
             _lastFindOptions == options;
 
-        int caretGlobal = ToGlobalIndex(_state.Caret);
+        int caretGlobal = _doc.ToGlobalIndex(_state.Caret);
 
         int startGlobal =
             (continueFromLastMatch && sameSearch && _lastFindStartGlobal >= 0)
@@ -1329,7 +1301,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         if (!TryFindMatch(text, needle, startGlobal, cmp, options, out int hit))
             return false;
 
-        SelectMatchByGlobalRange(hit, hit + needle.Length, text.Length);
+        SelectMatchByGlobalRange(hit, hit + needle.Length);
 
         _lastFindQuery = query;
         _lastFindOptions = options;
@@ -1445,56 +1417,18 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         return (bs % 2) == 1;
     }
 
-    private int ToGlobalIndex(MarkdownPosition pos)
+    private void SelectMatchByGlobalRange(int start, int end)
     {
-        if (_doc.LineCount <= 0) return 0;
-
-        int line = Math.Clamp(pos.Line, 0, _doc.LineCount - 1);
-        int col = Math.Clamp(pos.Column, 0, _doc.GetLineLength(line));
-
-        int idx = 0;
-        for (int i = 0; i < line; i++)
-            idx += _doc.GetLineLength(i) + 1; // '\n'
-
-        return idx + col;
-    }
-
-    private MarkdownPosition GlobalToPosition(int globalIndex, int totalLength)
-    {
-        if (_doc.LineCount <= 0)
-            return new MarkdownPosition(0, 0);
-
-        int idx = Math.Clamp(globalIndex, 0, totalLength);
-        int running = 0;
-
-        for (int line = 0; line < _doc.LineCount; line++)
-        {
-            int len = _doc.GetLineLength(line);
-            int lineStart = running;
-            int lineEnd = lineStart + len; // Caret darf am Line-End stehen
-
-            if (idx <= lineEnd)
-                return new MarkdownPosition(line, idx - lineStart);
-
-            running = lineEnd + 1; // '\n'
-        }
-
-        int last = _doc.LineCount - 1;
-        return new MarkdownPosition(last, _doc.GetLineLength(last));
-    }
-
-    private void SelectMatchByGlobalRange(int start, int end, int totalLength)
-    {
+        int totalLength = _doc.GetTotalTextLength();
         start = Math.Clamp(start, 0, totalLength);
         end = Math.Clamp(end, start, totalLength);
 
-        MarkdownPosition s = GlobalToPosition(start, totalLength);
-        MarkdownPosition e = GlobalToPosition(end, totalLength);
+        MarkdownPosition s = _doc.GlobalToPosition(start);
+        MarkdownPosition e = _doc.GlobalToPosition(end);
 
         _state.Restore(e, s, _doc);
 
-        RebuildLayout();
-        NormalizeCaretOutOfTables();
+        RefreshLayoutForCaretContext();
         ResetCaretBlink();
         EnsureCaretVisible();
         Invalidate();
@@ -1702,16 +1636,23 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
     // NEW: raw-source lines for any block under caret (heading/quote/list/hr)
     private IReadOnlySet<int>? GetRawSourceLinesForCaretBlock()
     {
-        var set = GetContainingRawSourceBlockLineSet(_state.Caret.Line);
-        return set is null || set.Count == 0 ? null : set;
+        if (!TryGetContainingRawSourceBlockRange(_state.Caret.Line, out int startLine, out int endLine))
+            return null;
+
+        var lines = new HashSet<int>();
+        for (int i = startLine; i <= endLine; i++)
+            lines.Add(i);
+
+        return lines;
     }
 
-
-    // NEW
-    private HashSet<int>? GetContainingRawSourceBlockLineSet(int caretLine)
+    private bool TryGetContainingRawSourceBlockRange(int caretLine, out int startLine, out int endLine)
     {
+        startLine = -1;
+        endLine = -1;
+
         if (caretLine < 0 || caretLine >= _doc.LineCount)
-            return null;
+            return false;
 
         foreach (var b in _doc.Blocks)
         {
@@ -1720,25 +1661,24 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
 
             // Tabellen bleiben bei bestehender Tabellenlogik
             if (b is TableBlock)
-                return null;
+                return false;
 
             // CodeFence über bestehende Fence-Logik
             if (b is CodeFenceBlock)
-                return null;
+                return false;
 
             // Für diese Blöcke Source zeigen, solange Caret im Block ist
             if (b is HeadingBlock or QuoteBlock or ListBlock || b.Kind == MarkdownBlockKind.HorizontalRule)
             {
-                var lines = new HashSet<int>();
-                for (int i = Math.Max(0, b.StartLine); i <= Math.Min(_doc.LineCount - 1, b.EndLine); i++)
-                    lines.Add(i);
-                return lines;
+                startLine = Math.Max(0, b.StartLine);
+                endLine = Math.Min(_doc.LineCount - 1, b.EndLine);
+                return true;
             }
 
-            return null;
+            return false;
         }
 
-        return null;
+        return false;
     }
     private IReadOnlySet<int>? GetRawInlineLinesForCaret()
     {
@@ -1778,7 +1718,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         string sourceLine = _doc.GetLine(caretLine);
 
         _rawTableStartLines.Remove(table.StartLine);
-        RebuildLayout();
+        RefreshLayoutForCaretContext(force: true);
 
         if (_layout.TryGetTableByStartLine(table.StartLine, out var tableLayout))
         {
@@ -1800,7 +1740,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
             return true;
         }
 
-        NormalizeCaretOutOfTables();
+        RefreshLayoutForCaretContext();
         ResetCaretBlink();
         EnsureCaretVisible();
         Invalidate();
@@ -2057,7 +1997,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
 
         _rawTableStartLines.Add(table.StartLine);
 
-        RebuildLayout();
+        RefreshLayoutForCaretContext(force: true);
 
         int targetLine = table.StartLine + 1;
         int targetCol = _doc.GetLineLength(targetLine);
@@ -2168,28 +2108,31 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
     protected override void OnSystemColorsChanged(EventArgs e)
     {
         base.OnSystemColorsChanged(e);
-        if (_themeMode == EditorThemeMode.System)
+        if (_themeMode == EditorThemeMode.System && AllowAutoThemeChange)
+        {
+            RefreshSystemThemePreference();
             ApplyTheme();
+        }
     }
 
     protected override void OnParentBackColorChanged(EventArgs e)
     {
         base.OnParentBackColorChanged(e);
-        if (_themeMode == EditorThemeMode.System)
+        if (_themeMode == EditorThemeMode.System && AllowAutoThemeChange)
             ApplyTheme();
     }
 
     protected override void OnParentForeColorChanged(EventArgs e)
     {
         base.OnParentForeColorChanged(e);
-        if (_themeMode == EditorThemeMode.System)
+        if (_themeMode == EditorThemeMode.System && AllowAutoThemeChange)
             ApplyTheme();
     }
 
     protected override void OnParentChanged(EventArgs e)
     {
         base.OnParentChanged(e);
-        if (_themeMode == EditorThemeMode.System)
+        if (_themeMode == EditorThemeMode.System && AllowAutoThemeChange)
             ApplyTheme();
     }
 
@@ -2202,7 +2145,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
             int x2 = Math.Max(line.TextX + 64, AutoScrollMinSize.Width - 16);
             int y = line.Bounds.Top + (line.Bounds.Height / 2);
 
-            using var p = new Pen(_horizontalRuleColor, 1f);
+            using var p = new Pen(_hrColor, 1f);
             g.DrawLine(p, x1, y, x2, y);
             return;
         }
@@ -2249,7 +2192,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
             {
                 string hint = $"Table draft: {draft.CurrentCols}/{draft.ExpectedCols}";
                 using var hintFont = new Font(Font, FontStyle.Italic);
-                DrawTextGdiPlus(g, hint, hintFont, new Point(line.TextX + w + 8, line.Bounds.Top + 1), _tableDraftHintColor);
+                DrawTextGdiPlus(g, hint, hintFont, new Point(line.TextX + w + 8, line.Bounds.Top + 1), _tableDraftHint);
             }
         }
 
@@ -2612,135 +2555,6 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
     }
 
 
-    private bool TryGetHiddenPrefixSelectionRect(
-    LayoutLine line,
-    int selStartSrc,
-    int selEndSrc,
-    out Rectangle rect)
-    {
-        rect = Rectangle.Empty;
-
-        int srcLen = line.SourceText.Length;
-        if (srcLen <= 0) return false;
-
-        int hiddenPrefixLen = GetHiddenPrefixSourceLength(line);
-        if (hiddenPrefixLen <= 0) return false;
-
-        int overlapStart = Math.Max(0, Math.Max(selStartSrc, 0));
-        int overlapEnd = Math.Min(hiddenPrefixLen, selEndSrc);
-        if (overlapEnd <= overlapStart) return false;
-
-        Font f = GetRenderFont(line);
-
-        // komplette versteckte Prefix-Breite (dynamisch, aus echtem Source-Text)
-        string fullHidden = line.SourceText[..hiddenPrefixLen];
-        int fullHiddenW = Math.Max(1, MeasureWidth(fullHidden, f));
-
-        int beforeW = overlapStart > 0
-            ? MeasureWidth(line.SourceText[..overlapStart], f)
-            : 0;
-
-        int untilW = overlapEnd > 0
-            ? MeasureWidth(line.SourceText[..overlapEnd], f)
-            : 0;
-
-        int xBase = line.TextX - fullHiddenW;
-        int x1 = xBase + beforeW;
-        int x2 = xBase + untilW;
-
-        if (x2 <= x1) x2 = x1 + 1;
-
-        rect = new Rectangle(
-            x1,
-            line.Bounds.Top + 1,
-            x2 - x1,
-            Math.Max(1, line.Bounds.Height - 2));
-
-        return true;
-    }
-
-    private static int GetHiddenPrefixSourceLength(LayoutLine line)
-    {
-        if (line.SourceText.Length == 0)
-            return 0;
-
-        int[] v2s = line.Projection.VisualToSource;
-        if (v2s is null || v2s.Length == 0)
-            return 0;
-
-        // Source-Index des ersten sichtbaren Visual-Zeichens.
-        // Alles davor gilt als "visuell versteckter Prefix".
-        int firstVisibleSrc = v2s[0];
-        return Math.Clamp(firstVisibleSrc, 0, line.SourceText.Length);
-    }
-
-    private void DrawSelectionForVisualElements(Graphics g, LayoutLine line, int selStartSrc, int selEndSrc, Brush brush)
-    {
-        // Horizontal rule: gesamte visuelle Linie markieren, sobald Quellbereich selektiert ist
-        if (line.Kind == MarkdownBlockKind.HorizontalRule)
-        {
-            if (!RangesOverlap(selStartSrc, selEndSrc, 0, line.SourceText.Length))
-                return;
-
-            int x1 = line.TextX;
-            int x2 = Math.Max(line.TextX + 64, AutoScrollMinSize.Width - 16);
-            int y = line.Bounds.Top + (line.Bounds.Height / 2);
-
-            var hrRect = Rectangle.FromLTRB(x1, y - 3, x2, y + 3);
-            g.FillRectangle(brush, hrRect);
-            return;
-        }
-
-        // Task-Checkbox (☐ / ☑)
-        if (line.Kind == MarkdownBlockKind.List &&
-            line.IsTaskListItem &&
-            line.TaskMarkerSourceStart >= 0 &&
-            line.TaskMarkerSourceLength > 0)
-        {
-            int mStart = line.TaskMarkerSourceStart;
-            int mEnd = mStart + line.TaskMarkerSourceLength;
-
-            if (RangesOverlap(selStartSrc, selEndSrc, mStart, mEnd) &&
-                TryGetTaskCheckboxRect(line, out var checkboxRect))
-            {
-                g.FillRectangle(brush, checkboxRect);
-            }
-        }
-
-        // Quote-Bar links markieren, wenn Quote-Präfix selektiert wurde
-        if (line.Kind == MarkdownBlockKind.Quote)
-        {
-            string? quotePrefix = GetQuotePrefix(line.SourceText);
-            if (quotePrefix is not null && RangesOverlap(selStartSrc, selEndSrc, 0, quotePrefix.Length))
-            {
-                var barRect = new Rectangle(
-                    10,
-                    line.Bounds.Top + 1,
-                    5,
-                    Math.Max(1, line.Bounds.Height - 2));
-
-                g.FillRectangle(brush, barRect);
-            }
-        }
-
-        // Heading-Markerbereich (#, ##, ...)
-        if (line.Kind == MarkdownBlockKind.Heading)
-        {
-            int markerLen = GetHeadingMarkerLength(line.SourceText);
-            if (markerLen > 0 && RangesOverlap(selStartSrc, selEndSrc, 0, markerLen))
-            {
-                // Marker werden im Rendern ausgeblendet -> visuellen Bereich links vor Heading-Text highlighten
-                var markerRect = new Rectangle(
-                    Math.Max(0, line.TextX - 12),
-                    line.Bounds.Top + 1,
-                    10,
-                    Math.Max(1, line.Bounds.Height - 2));
-
-                g.FillRectangle(brush, markerRect);
-            }
-        }
-    }
-
     private bool TryGetTaskCheckboxRect(LayoutLine line, out Rectangle rect)
     {
         rect = Rectangle.Empty;
@@ -2934,32 +2748,28 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         return visCol == 0;
     }
 
-    private void CopySelection()
-    {
-        string sel = _state.GetSelectedText(_doc);
-        if (!string.IsNullOrEmpty(sel))
-            Clipboard.SetText(sel);
-    }
-
     private void ApplyDocumentEdit(Func<bool> editOperation)
     {
         EndCellEdit(discard: false, move: CellMove.None);
 
-        EditorSnapshot before = CaptureSnapshot();
+        string[] beforeLines = _doc.SnapshotLines();
+        MarkdownPosition beforeCaret = _state.Caret;
+        MarkdownPosition? beforeAnchor = _state.Anchor;
+
         bool changed = editOperation();
         if (!changed) return;
-
-        PushUndo(before);
-        _redo.Clear();
 
         _doc.ReparseDirtyBlocks();
         EnsureTrailingEditableLineAfterTerminalTable();
 
+        UndoRecord undo = BuildUndoRecord(beforeLines, beforeCaret, beforeAnchor);
+        PushUndo(undo);
+        _redo.Clear();
+
         CleanupRawTableModes();
         ExitRawModesIfCaretOutside();
 
-        RebuildLayout();
-        NormalizeCaretOutOfTables();
+        RefreshLayoutAfterDocumentChange();
 
         ResetCaretBlink();
         EnsureCaretVisible();
@@ -2973,12 +2783,11 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         EndCellEdit(discard: false, move: CellMove.None);
         if (_undo.Count == 0) return;
 
-        EditorSnapshot current = CaptureSnapshot();
-        EditorSnapshot prev = _undo[^1];
+        UndoRecord prev = _undo[^1];
         _undo.RemoveAt(_undo.Count - 1);
 
-        _redo.Add(current);
-        RestoreSnapshot(prev);
+        _redo.Add(prev);
+        ApplyUndoRecord(prev, undo: true);
     }
 
     private void Redo()
@@ -2986,26 +2795,31 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         EndCellEdit(discard: false, move: CellMove.None);
         if (_redo.Count == 0) return;
 
-        EditorSnapshot current = CaptureSnapshot();
-        EditorSnapshot next = _redo[^1];
+        UndoRecord next = _redo[^1];
         _redo.RemoveAt(_redo.Count - 1);
 
-        _undo.Add(current);
-        RestoreSnapshot(next);
+        _undo.Add(next);
+        ApplyUndoRecord(next, undo: false);
     }
 
-    private void RestoreSnapshot(EditorSnapshot s)
+    private void ApplyUndoRecord(UndoRecord record, bool undo)
     {
-        _doc.LoadMarkdown(s.Markdown);
+        int removeCount = undo ? record.NewLines.Length : record.OldLines.Length;
+        int endLine = record.StartLine + removeCount - 1;
+        IReadOnlyList<string> replacement = undo ? record.OldLines : record.NewLines;
+
+        _doc.ReplaceLines(record.StartLine, endLine, replacement);
+        _doc.ReparseAll();
         EnsureTrailingEditableLineAfterTerminalTable();
 
         _rawTableStartLines.Clear();
         _rawCodeFenceStartLine = null;
 
-        _state.Restore(s.Caret, s.Anchor, _doc);
+        MarkdownPosition caret = undo ? record.BeforeCaret : record.AfterCaret;
+        MarkdownPosition? anchor = undo ? record.BeforeAnchor : record.AfterAnchor;
+        _state.Restore(caret, anchor, _doc);
 
-        RebuildLayout();
-        NormalizeCaretOutOfTables();
+        RefreshLayoutAfterDocumentChange();
 
         ResetCaretBlink();
         EnsureCaretVisible();
@@ -3014,10 +2828,61 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         MarkdownChanged?.Invoke(this, new MarkdownChangedEventArgs(_doc.ToMarkdown()));
     }
 
-    private EditorSnapshot CaptureSnapshot()
-        => new(_doc.ToMarkdown(), _state.Caret, _state.Anchor);
+    private UndoRecord BuildUndoRecord(
+        IReadOnlyList<string> beforeLines,
+        MarkdownPosition beforeCaret,
+        MarkdownPosition? beforeAnchor)
+    {
+        IReadOnlyList<string> afterLines = _doc.Lines;
 
-    private void PushUndo(EditorSnapshot s)
+        int prefix = 0;
+        int beforeCount = beforeLines.Count;
+        int afterCount = afterLines.Count;
+
+        while (prefix < beforeCount &&
+               prefix < afterCount &&
+               string.Equals(beforeLines[prefix], afterLines[prefix], StringComparison.Ordinal))
+        {
+            prefix++;
+        }
+
+        int suffix = 0;
+        while (suffix < beforeCount - prefix &&
+               suffix < afterCount - prefix &&
+               string.Equals(beforeLines[beforeCount - 1 - suffix], afterLines[afterCount - 1 - suffix], StringComparison.Ordinal))
+        {
+            suffix++;
+        }
+
+        int removedCount = beforeCount - prefix - suffix;
+        int insertedCount = afterCount - prefix - suffix;
+
+        string[] oldLines = SliceLines(beforeLines, prefix, removedCount);
+        string[] newLines = SliceLines(afterLines, prefix, insertedCount);
+
+        return new UndoRecord(
+            prefix,
+            oldLines,
+            newLines,
+            beforeCaret,
+            beforeAnchor,
+            _state.Caret,
+            _state.Anchor);
+    }
+
+    private static string[] SliceLines(IReadOnlyList<string> lines, int start, int count)
+    {
+        if (count <= 0)
+            return Array.Empty<string>();
+
+        var result = new string[count];
+        for (int i = 0; i < count; i++)
+            result[i] = lines[start + i];
+
+        return result;
+    }
+
+    private void PushUndo(UndoRecord s)
     {
         _undo.Add(s);
         if (_undo.Count > MaxUndo)
@@ -3029,6 +2894,44 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         SyncCodeFenceRawModeWithCaret();
         ExitRawModesIfCaretOutside();
 
+        RebuildLayoutCore();
+    }
+
+    private void RefreshLayoutAfterDocumentChange()
+    {
+        InvalidateLayoutContext();
+        RefreshLayoutForCaretContext(force: true);
+    }
+
+    private bool RefreshLayoutForCaretContext(bool force = false)
+    {
+        bool rebuilt = false;
+
+        while (true)
+        {
+            SyncCodeFenceRawModeWithCaret();
+            ExitRawModesIfCaretOutside();
+
+            if (force || !IsLayoutContextCurrent())
+            {
+                RebuildLayoutCore();
+                rebuilt = true;
+                force = false;
+            }
+
+            if (!NormalizeCaretOutOfTables())
+                return rebuilt;
+
+            force = true;
+        }
+    }
+
+    private void RebuildLayoutCore()
+    {
+        IReadOnlySet<int>? rawCodeFenceStarts = GetRawCodeFenceStarts();
+        IReadOnlySet<int>? rawSourceLines = GetRawSourceLinesForCaretBlock();
+        IReadOnlySet<int>? rawInlineLines = GetRawInlineLinesForCaret();
+
         _layout.Rebuild(
             _doc,
             ClientSize,
@@ -3036,38 +2939,136 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
             _boldFont,
             _monoFont,
             _rawTableStartLines,
-            GetRawCodeFenceStarts(),
-            GetRawSourceLinesForCaretBlock(),
-            GetRawInlineLinesForCaret());
+            rawCodeFenceStarts,
+            rawSourceLines,
+            rawInlineLines);
 
         AutoScrollMinSize = _layout.ContentSize;
+        UpdateLayoutContext(rawCodeFenceStarts, rawSourceLines, rawInlineLines);
     }
 
 
-    private void NormalizeCaretOutOfTables()
+    private bool NormalizeCaretOutOfTables()
     {
         if (!_layout.IsTableSourceLine(_state.Caret.Line))
-            return;
+            return false;
 
         if (TryGetContainingTableByLine(_state.Caret.Line, out var t))
         {
             if (!_rawTableStartLines.Contains(t.StartLine))
             {
                 _rawTableStartLines.Add(t.StartLine);
-                RebuildLayout();
-                return;
+                return true;
             }
         }
 
         int nearest = _layout.GetNearestTextLine(_state.Caret.Line, preferForward: true);
         if (nearest < 0)
         {
-            _state.Restore(new MarkdownPosition(0, 0), null, _doc);
-            return;
+            MarkdownPosition target = new(0, 0);
+            bool changed = _state.Caret != target || _state.Anchor.HasValue;
+            if (changed)
+                _state.Restore(target, null, _doc);
+
+            return changed;
         }
 
         int col = Math.Min(_state.Caret.Column, _doc.GetLineLength(nearest));
-        _state.Restore(new MarkdownPosition(nearest, col), null, _doc);
+        MarkdownPosition next = new(nearest, col);
+        bool caretChanged = _state.Caret != next || _state.Anchor.HasValue;
+        if (caretChanged)
+            _state.Restore(next, null, _doc);
+
+        return caretChanged;
+    }
+
+    private bool IsLayoutContextCurrent()
+    {
+        if (!_layoutContextInitialized)
+            return false;
+
+        if (_layoutContextDocumentVersion != _doc.Version)
+            return false;
+
+        if (_layoutContextRawCodeFenceStart != _rawCodeFenceStartLine)
+            return false;
+
+        int? rawInlineLine = ResolveRawInlineLine();
+        if (_layoutContextRawInlineLine != rawInlineLine)
+            return false;
+
+        if (TryGetContainingRawSourceBlockRange(_state.Caret.Line, out int rawSourceStart, out int rawSourceEnd))
+        {
+            if (_layoutContextRawSourceStart != rawSourceStart || _layoutContextRawSourceEnd != rawSourceEnd)
+                return false;
+        }
+        else if (_layoutContextRawSourceStart >= 0 || _layoutContextRawSourceEnd >= 0)
+        {
+            return false;
+        }
+
+        if (_layoutContextRawTableStarts.Length != _rawTableStartLines.Count)
+            return false;
+
+        foreach (int start in _layoutContextRawTableStarts)
+        {
+            if (!_rawTableStartLines.Contains(start))
+                return false;
+        }
+
+        return true;
+    }
+
+    private void UpdateLayoutContext(
+        IReadOnlySet<int>? rawCodeFenceStarts,
+        IReadOnlySet<int>? rawSourceLines,
+        IReadOnlySet<int>? rawInlineLines)
+    {
+        _layoutContextInitialized = true;
+        _layoutContextDocumentVersion = _doc.Version;
+        _layoutContextRawCodeFenceStart = rawCodeFenceStarts?.Count > 0 ? rawCodeFenceStarts.First() : null;
+        _layoutContextRawInlineLine = rawInlineLines?.Count > 0 ? rawInlineLines.First() : null;
+
+        if (rawSourceLines is not null && rawSourceLines.Count > 0)
+        {
+            _layoutContextRawSourceStart = rawSourceLines.Min();
+            _layoutContextRawSourceEnd = rawSourceLines.Max();
+        }
+        else
+        {
+            _layoutContextRawSourceStart = -1;
+            _layoutContextRawSourceEnd = -1;
+        }
+
+        _layoutContextRawTableStarts = _rawTableStartLines.Count == 0
+            ? Array.Empty<int>()
+            : _rawTableStartLines.OrderBy(x => x).ToArray();
+    }
+
+    private void InvalidateLayoutContext()
+    {
+        _layoutContextInitialized = false;
+        _layoutContextDocumentVersion = -1;
+        _layoutContextRawCodeFenceStart = null;
+        _layoutContextRawInlineLine = null;
+        _layoutContextRawSourceStart = -1;
+        _layoutContextRawSourceEnd = -1;
+        _layoutContextRawTableStarts = Array.Empty<int>();
+    }
+
+    private int? ResolveRawInlineLine()
+    {
+        int line = _state.Caret.Line;
+        if (line < 0 || line >= _doc.LineCount)
+            return null;
+
+        if (IsInsideTable(line))
+            return null;
+
+        if (GetContainingCodeFenceStartLine(line).HasValue)
+            return null;
+
+        return line;
     }
 
     private void EnterRawTableSourceFromGrid(TableLayout tableLayout, int gridRow, int gridCol)
@@ -3076,7 +3077,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
 
         TableBlock table = tableLayout.Block;
         _rawTableStartLines.Add(table.StartLine);
-        RebuildLayout();
+        RefreshLayoutForCaretContext(force: true);
 
         int srcLine = MapGridRowToSourceLine(table, gridRow);
         string src = _doc.GetLine(srcLine);
@@ -3103,7 +3104,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         if (table is null) return;
 
         _rawTableStartLines.Add(start);
-        RebuildLayout();
+        RefreshLayoutForCaretContext(force: true);
 
         int srcLine = MapGridRowToSourceLine(table, row);
         string src = _doc.GetLine(srcLine);
@@ -3302,54 +3303,12 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
 
     private int MeasureVisualPrefix(LayoutLine line, int visualCols)
     {
-        string display = line.Projection.DisplayText;
-        visualCols = Math.Clamp(visualCols, 0, display.Length);
-        if (visualCols <= 0) return 0;
+        int[] offsets = line.VisualOffsets;
+        if (offsets.Length == 0)
+            return 0;
 
-        Font baseFont = GetRenderFont(line);
-
-        if (line.InlineRuns is null || line.InlineRuns.Count == 0)
-        {
-            return MeasureWidth(display[..visualCols], baseFont);
-        }
-
-        int remaining = visualCols;
-        int width = 0;
-        var cache = new Dictionary<int, Font>();
-
-        try
-        {
-            foreach (var run in line.InlineRuns)
-            {
-                if (remaining <= 0) break;
-                if (string.IsNullOrEmpty(run.Text)) continue;
-
-                int runLen = run.Text.Length;
-                int take = Math.Min(remaining, runLen);
-                if (take <= 0) continue;
-
-                bool isCode = (run.Style & InlineStyle.Code) != 0;
-                Font runFont = GetOrCreateInlineFont(cache, baseFont, run.Style, isCode, _monoFont);
-
-                if (isCode)
-                    width += InlineCodePadX;
-
-                string part = take == runLen ? run.Text : run.Text[..take];
-                width += MeasureWidth(part, runFont);
-
-                if (isCode && take == runLen)
-                    width += InlineCodePadX;
-
-                remaining -= take;
-            }
-        }
-        finally
-        {
-            foreach (var f in cache.Values)
-                f.Dispose();
-        }
-
-        return width;
+        visualCols = Math.Clamp(visualCols, 0, offsets.Length - 1);
+        return offsets[visualCols];
     }
 
     private void ResetCaretBlink()
@@ -3431,8 +3390,8 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
             Text = text,
             Bounds = Rectangle.Inflate(ContentToClient(cellRectContent), -4, -4),
             Font = Font,
-            BackColor = _tableCellBg,
-            ForeColor = ForeColor
+            BackColor = _cellEditorBack,
+            ForeColor = _cellEditorFore
         };
 
         _cellEditor.KeyDown += CellEditor_KeyDown;
@@ -3561,21 +3520,24 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
                 }
             }
 
-            EditorSnapshot before = CaptureSnapshot();
+            string[] beforeLines = _doc.SnapshotLines();
+            MarkdownPosition beforeCaret = _state.Caret;
+            MarkdownPosition? beforeAnchor = _state.Anchor;
 
             IReadOnlyList<string> tableLines = _activeTable.Model.ToMarkdownLines();
             _doc.ReplaceLines(_activeTable.StartLine, _activeTable.EndLine, tableLines);
             _doc.ReparseAll();
             EnsureTrailingEditableLineAfterTerminalTable();
 
+            UndoRecord undo = BuildUndoRecord(beforeLines, beforeCaret, beforeAnchor);
+
             CleanupRawTableModes();
             ExitRawModesIfCaretOutside();
 
-            PushUndo(before);
+            PushUndo(undo);
             _redo.Clear();
 
-            RebuildLayout();
-            NormalizeCaretOutOfTables();
+            RefreshLayoutAfterDocumentChange();
             Invalidate();
 
             MarkdownChanged?.Invoke(this, new MarkdownChangedEventArgs(_doc.ToMarkdown()));
@@ -3664,5 +3626,12 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         Previous
     }
 
-    private readonly record struct EditorSnapshot(string Markdown, MarkdownPosition Caret, MarkdownPosition? Anchor);
+    private readonly record struct UndoRecord(
+        int StartLine,
+        string[] OldLines,
+        string[] NewLines,
+        MarkdownPosition BeforeCaret,
+        MarkdownPosition? BeforeAnchor,
+        MarkdownPosition AfterCaret,
+        MarkdownPosition? AfterAnchor);
 }

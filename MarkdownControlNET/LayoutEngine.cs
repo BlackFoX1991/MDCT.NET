@@ -18,6 +18,7 @@ public sealed class LayoutLine
     public required int SourceLine { get; init; }
     public required string SourceText { get; init; }
     public required VisualProjection Projection { get; init; }
+    public required int[] VisualOffsets { get; init; }
     public required Rectangle Bounds { get; init; }
     public required int TextX { get; init; }
     public required int TextWidth { get; init; }
@@ -116,7 +117,12 @@ public sealed class LayoutEngine
     private readonly List<LayoutLine> _lines = new();
     private readonly Dictionary<int, LayoutLine> _lineBySource = new();
     private readonly List<TableLayout> _tables = new();
+    private readonly Dictionary<int, TableLayout> _tableByStartLine = new();
     private readonly HashSet<int> _tableSourceLines = new();
+    private readonly Dictionary<string, InlineParseResult> _inlineParseCache = new(StringComparer.Ordinal);
+
+    private int[] _lineTops = Array.Empty<int>();
+    private int[] _tableTops = Array.Empty<int>();
 
     private Font _baseFont = SystemFonts.DefaultFont;
     private Font _boldFont = SystemFonts.DefaultFont;
@@ -469,7 +475,10 @@ public sealed class LayoutEngine
         _lines.Clear();
         _lineBySource.Clear();
         _tables.Clear();
+        _tableByStartLine.Clear();
         _tableSourceLines.Clear();
+        _lineTops = Array.Empty<int>();
+        _tableTops = Array.Empty<int>();
 
         if (doc.LineCount == 0)
         {
@@ -545,6 +554,7 @@ public sealed class LayoutEngine
             {
                 var tableLayout = BuildTableLayout(tb, y);
                 _tables.Add(tableLayout);
+                _tableByStartLine[tableLayout.StartLine] = tableLayout;
 
                 y += tableLayout.Bounds.Height + 6;
                 maxWidth = Math.Max(maxWidth, tableLayout.Bounds.Right + 12);
@@ -685,7 +695,7 @@ public sealed class LayoutEngine
                         // Ordered/unordered/nested/task visual + stable source mapping
                         proj = BuildListProjection(source, li);
 
-                        InlineParseResult inline = InlineMarkdown.Parse(proj.DisplayText);
+                        InlineParseResult inline = ParseInlineCached(proj.DisplayText);
                         proj = ComposeProjection(proj, inline);
                         runs = inline.Runs;
                     }
@@ -707,7 +717,7 @@ public sealed class LayoutEngine
                         }
                         else
                         {
-                            InlineParseResult inline = InlineMarkdown.Parse(prefixProj.DisplayText);
+                            InlineParseResult inline = ParseInlineCached(prefixProj.DisplayText);
                             proj = ComposeProjection(prefixProj, inline);
                             runs = inline.Runs;
                         }
@@ -730,12 +740,14 @@ public sealed class LayoutEngine
                 int textWidth = (isHorizontalRule && !forceRawThisLine)
                     ? Math.Max(1, viewport.Width - left - 12)
                     : Math.Max(1, MeasureInlineRunsWidth(runs, measureFont));
+                int[] visualOffsets = BuildVisualOffsets(proj.DisplayText, runs, measureFont);
 
                 var line = new LayoutLine
                 {
                     SourceLine = lineIdx,
                     SourceText = source,
                     Projection = proj,
+                    VisualOffsets = visualOffsets,
                     Bounds = new Rectangle(left, y, Math.Max(1, textWidth), lineHeight),
                     TextX = left,
                     TextWidth = textWidth,
@@ -771,13 +783,23 @@ public sealed class LayoutEngine
             lineIdx++;
         }
 
+        _lineTops = _lines.Count == 0 ? Array.Empty<int>() : _lines.Select(line => line.Bounds.Top).ToArray();
+        _tableTops = _tables.Count == 0 ? Array.Empty<int>() : _tables.Select(table => table.Bounds.Top).ToArray();
         ContentSize = new Size(Math.Max(viewport.Width, maxWidth), Math.Max(viewport.Height, y + 6));
     }
 
     public IEnumerable<LayoutLine> GetVisibleLines(Rectangle viewport)
     {
-        foreach (var line in _lines)
+        if (_lines.Count == 0)
+            yield break;
+
+        int start = FindFirstVisibleIndex(_lineTops, viewport.Top);
+        for (int i = start; i < _lines.Count; i++)
         {
+            var line = _lines[i];
+            if (line.Bounds.Top > viewport.Bottom)
+                yield break;
+
             if (line.Bounds.Bottom >= viewport.Top && line.Bounds.Top <= viewport.Bottom)
                 yield return line;
         }
@@ -785,8 +807,16 @@ public sealed class LayoutEngine
 
     public IEnumerable<TableLayout> GetVisibleTables(Rectangle viewport)
     {
-        foreach (var t in _tables)
+        if (_tables.Count == 0)
+            yield break;
+
+        int start = FindFirstVisibleIndex(_tableTops, viewport.Top);
+        for (int i = start; i < _tables.Count; i++)
         {
+            var t = _tables[i];
+            if (t.Bounds.Top > viewport.Bottom)
+                yield break;
+
             if (t.Bounds.Bottom >= viewport.Top && t.Bounds.Top <= viewport.Bottom)
                 yield return t;
         }
@@ -824,17 +854,7 @@ public sealed class LayoutEngine
 
     public bool TryGetTableByStartLine(int startLine, out TableLayout table)
     {
-        for (int i = 0; i < _tables.Count; i++)
-        {
-            if (_tables[i].StartLine == startLine)
-            {
-                table = _tables[i];
-                return true;
-            }
-        }
-
-        table = null!;
-        return false;
+        return _tableByStartLine.TryGetValue(startLine, out table!);
     }
 
     public bool TryHitTestTableCell(Point contentPoint, out TableHit hit)
@@ -872,10 +892,11 @@ public sealed class LayoutEngine
         if (_lines.Count == 0)
             return new MarkdownPosition(0, 0);
 
-        LayoutLine best = _lines[0];
+        int pivot = FindNearestLineIndex(contentPoint.Y);
+        LayoutLine best = _lines[pivot];
         int bestDist = DistanceToY(best.Bounds, contentPoint.Y);
 
-        for (int i = 1; i < _lines.Count; i++)
+        for (int i = Math.Max(0, pivot - 1); i <= Math.Min(_lines.Count - 1, pivot + 1); i++)
         {
             int d = DistanceToY(_lines[i].Bounds, contentPoint.Y);
             if (d < bestDist)
@@ -883,19 +904,10 @@ public sealed class LayoutEngine
                 bestDist = d;
                 best = _lines[i];
             }
-
-            if (d == 0)
-            {
-                best = _lines[i];
-                break;
-            }
         }
 
         int localX = contentPoint.X - best.TextX;
-
-        Font hitFont = ResolveLineMeasureFont(best.Kind, best.HeadingLevel, best.FontRole, out bool disposeHitFont);
-        int visCol = ColumnFromX(best.Projection.DisplayText, best.InlineRuns, hitFont, localX);
-        if (disposeHitFont) hitFont.Dispose();
+        int visCol = ColumnFromX(best.VisualOffsets, localX);
 
         visCol = Math.Clamp(visCol, 0, best.Projection.VisualToSource.Length - 1);
 
@@ -939,7 +951,7 @@ public sealed class LayoutEngine
             for (int r = 0; r < rows; r++)
             {
                 string raw = model.Rows[r][c] ?? string.Empty;
-                InlineParseResult parsed = InlineMarkdown.Parse(raw);
+                InlineParseResult parsed = ParseInlineCached(raw);
 
                 texts[r, c] = parsed.Text;
                 runs[r, c] = parsed.Runs;
@@ -988,6 +1000,21 @@ public sealed class LayoutEngine
             texts,
             runs,
             alignments);
+    }
+
+    private InlineParseResult ParseInlineCached(string text)
+    {
+        text ??= string.Empty;
+
+        if (_inlineParseCache.TryGetValue(text, out var parsed))
+            return parsed;
+
+        if (_inlineParseCache.Count >= 2048)
+            _inlineParseCache.Clear();
+
+        parsed = InlineMarkdown.Parse(text);
+        _inlineParseCache[text] = parsed;
+        return parsed;
     }
 
     private static bool SupportsInlineFormatting(MarkdownBlockKind kind) => kind switch
@@ -1113,93 +1140,67 @@ public sealed class LayoutEngine
         return 0;
     }
 
-    private static int ColumnFromX(string displayText, IReadOnlyList<InlineRun> runs, Font baseFont, int localX)
+    private static int FindFirstVisibleIndex(int[] tops, int viewportTop)
     {
-        if (displayText.Length == 0 || localX <= 0) return 0;
-        if (runs.Count == 0) return ColumnFromXSimple(displayText, baseFont, localX);
+        if (tops.Length == 0)
+            return 0;
 
-        int x = 0;
-        int col = 0;
+        int idx = Array.BinarySearch(tops, viewportTop);
+        if (idx < 0)
+            idx = ~idx;
 
-        var cache = new Dictionary<InlineStyle, Font>();
-        try
-        {
-            foreach (var run in runs)
-            {
-                if (string.IsNullOrEmpty(run.Text)) continue;
-
-                bool isCode = (run.Style & InlineStyle.Code) != 0;
-                Font f = GetOrCreateRunFont(cache, baseFont, run.Style);
-
-                if (isCode)
-                {
-                    int leftPadEnd = x + InlineCodeChipPadX;
-                    if (localX <= leftPadEnd)
-                        return col;
-                    x = leftPadEnd;
-                }
-
-                for (int i = 0; i < run.Text.Length; i++)
-                {
-                    int cw = MeasureWidth(run.Text[i].ToString(), f);
-                    int nextX = x + cw;
-
-                    if (localX <= nextX)
-                    {
-                        int dl = localX - x;
-                        int dr = nextX - localX;
-                        return dl <= dr ? col : col + 1;
-                    }
-
-                    x = nextX;
-                    col++;
-                }
-
-                if (isCode)
-                {
-                    int rightPadEnd = x + InlineCodeChipPadX;
-                    if (localX <= rightPadEnd)
-                        return col;
-                    x = rightPadEnd;
-                }
-            }
-        }
-        finally
-        {
-            foreach (var kv in cache)
-                kv.Value.Dispose();
-        }
-
-        return displayText.Length;
+        return Math.Max(0, idx - 1);
     }
 
-    private static int ColumnFromXSimple(string displayText, Font font, int localX)
+    private int FindNearestLineIndex(int y)
     {
-        int x = 0;
-        for (int col = 0; col < displayText.Length; col++)
-        {
-            int cw = MeasureWidth(displayText[col].ToString(), font);
-            int nextX = x + cw;
+        if (_lineTops.Length == 0)
+            return 0;
 
-            if (localX <= nextX)
-            {
-                int dl = localX - x;
-                int dr = nextX - localX;
-                return dl <= dr ? col : col + 1;
-            }
+        int idx = Array.BinarySearch(_lineTops, y);
+        if (idx >= 0)
+            return idx;
 
-            x = nextX;
-        }
+        idx = ~idx;
+        if (idx <= 0)
+            return 0;
+        if (idx >= _lines.Count)
+            return _lines.Count - 1;
 
-        return displayText.Length;
+        int previous = idx - 1;
+        int next = idx;
+
+        int previousDist = DistanceToY(_lines[previous].Bounds, y);
+        int nextDist = DistanceToY(_lines[next].Bounds, y);
+        return previousDist <= nextDist ? previous : next;
     }
 
-    private static int MeasureInlineRunsWidth(IReadOnlyList<InlineRun> runs, Font baseFont)
+    private static int ColumnFromX(int[] visualOffsets, int localX)
+    {
+        if (visualOffsets.Length == 0 || localX <= 0)
+            return 0;
+
+        int idx = Array.BinarySearch(visualOffsets, localX);
+        if (idx >= 0)
+            return idx;
+
+        idx = ~idx;
+        if (idx <= 0)
+            return 0;
+        if (idx >= visualOffsets.Length)
+            return visualOffsets.Length - 1;
+
+        int left = visualOffsets[idx - 1];
+        int right = visualOffsets[idx];
+        return (localX - left) <= (right - localX) ? idx - 1 : idx;
+    }
+
+    private int MeasureInlineRunsWidth(IReadOnlyList<InlineRun> runs, Font baseFont)
     {
         if (runs.Count == 0) return 0;
 
         int width = 0;
-        var cache = new Dictionary<InlineStyle, Font>();
+        var cache = new Dictionary<int, Font>();
 
         try
         {
@@ -1208,7 +1209,7 @@ public sealed class LayoutEngine
                 if (string.IsNullOrEmpty(run.Text)) continue;
 
                 bool isCode = (run.Style & InlineStyle.Code) != 0;
-                Font f = GetOrCreateRunFont(cache, baseFont, run.Style);
+                Font f = GetOrCreateRunFont(cache, baseFont, run.Style, isCode);
                 width += MeasureWidth(run.Text, f);
 
                 if (isCode)
@@ -1224,16 +1225,82 @@ public sealed class LayoutEngine
         return width;
     }
 
-    private static Font GetOrCreateRunFont(Dictionary<InlineStyle, Font> cache, Font baseFont, InlineStyle style)
+    private int[] BuildVisualOffsets(string displayText, IReadOnlyList<InlineRun> runs, Font baseFont)
+    {
+        int visualLength = displayText.Length;
+        var offsets = new int[visualLength + 1];
+
+        if (visualLength == 0)
+            return offsets;
+
+        if (runs.Count == 0)
+        {
+            int x = 0;
+            for (int i = 0; i < visualLength; i++)
+            {
+                x += MeasureWidth(displayText[i].ToString(), baseFont);
+                offsets[i + 1] = x;
+            }
+
+            return offsets;
+        }
+
+        int col = 0;
+        int width = 0;
+        var cache = new Dictionary<int, Font>();
+
+        try
+        {
+            foreach (var run in runs)
+            {
+                if (string.IsNullOrEmpty(run.Text))
+                    continue;
+
+                bool isCode = (run.Style & InlineStyle.Code) != 0;
+                Font runFont = GetOrCreateRunFont(cache, baseFont, run.Style, isCode);
+
+                if (isCode)
+                    width += InlineCodeChipPadX;
+
+                for (int i = 0; i < run.Text.Length; i++)
+                {
+                    width += MeasureWidth(run.Text[i].ToString(), runFont);
+                    col++;
+                    offsets[col] = width;
+                }
+
+                if (isCode)
+                {
+                    width += InlineCodeChipPadX;
+                    offsets[col] = width;
+                }
+            }
+        }
+        finally
+        {
+            foreach (var kv in cache)
+                kv.Value.Dispose();
+        }
+
+        return offsets;
+    }
+
+    private Font GetOrCreateRunFont(Dictionary<int, Font> cache, Font baseFont, InlineStyle style, bool isCode)
     {
         if (style == InlineStyle.None)
             return baseFont;
 
-        if (cache.TryGetValue(style, out var f))
+        InlineStyle normalized = style & ~InlineStyle.Code;
+        int key = ((int)normalized & 0xFF)
+                  | (isCode ? 0x100 : 0)
+                  | (((int)baseFont.Style & 0xFF) << 9);
+
+        if (cache.TryGetValue(key, out var f))
             return f;
 
-        f = InlineMarkdown.CreateStyledFont(baseFont, style);
-        cache[style] = f;
+        Font seed = isCode ? _monoFont : baseFont;
+        f = InlineMarkdown.CreateStyledFont(seed, normalized);
+        cache[key] = f;
         return f;
     }
 
