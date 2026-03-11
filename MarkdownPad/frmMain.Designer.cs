@@ -121,6 +121,7 @@ namespace MarkdownPad
             themeStatusLabel = new ToolStripLabel();
             toolStripSeparator7 = new ToolStripSeparator();
             messageStatusLabel = new ToolStripLabel();
+            aboutToolStripMenuItem = new ToolStripMenuItem();
             tabContextMenuStrip.SuspendLayout();
             padMenu.SuspendLayout();
             padToolStrip.SuspendLayout();
@@ -309,7 +310,7 @@ namespace MarkdownPad
             undoToolStripMenuItem.Image = (Image)resources.GetObject("undoToolStripMenuItem.Image");
             undoToolStripMenuItem.Name = "undoToolStripMenuItem";
             undoToolStripMenuItem.ShortcutKeys = Keys.Control | Keys.Z;
-            undoToolStripMenuItem.Size = new Size(184, 26);
+            undoToolStripMenuItem.Size = new Size(166, 22);
             undoToolStripMenuItem.Text = "Undo";
             // 
             // redoToolStripMenuItem
@@ -317,20 +318,20 @@ namespace MarkdownPad
             redoToolStripMenuItem.Image = (Image)resources.GetObject("redoToolStripMenuItem.Image");
             redoToolStripMenuItem.Name = "redoToolStripMenuItem";
             redoToolStripMenuItem.ShortcutKeys = Keys.Control | Keys.Y;
-            redoToolStripMenuItem.Size = new Size(184, 26);
+            redoToolStripMenuItem.Size = new Size(166, 22);
             redoToolStripMenuItem.Text = "Redo";
             // 
             // editToolStripSeparator1
             // 
             editToolStripSeparator1.Name = "editToolStripSeparator1";
-            editToolStripSeparator1.Size = new Size(181, 6);
+            editToolStripSeparator1.Size = new Size(163, 6);
             // 
             // cutToolStripMenuItem
             // 
             cutToolStripMenuItem.Image = (Image)resources.GetObject("cutToolStripMenuItem.Image");
             cutToolStripMenuItem.Name = "cutToolStripMenuItem";
             cutToolStripMenuItem.ShortcutKeys = Keys.Control | Keys.X;
-            cutToolStripMenuItem.Size = new Size(184, 26);
+            cutToolStripMenuItem.Size = new Size(166, 22);
             cutToolStripMenuItem.Text = "Cut";
             // 
             // copyToolStripMenuItem
@@ -338,7 +339,7 @@ namespace MarkdownPad
             copyToolStripMenuItem.Image = (Image)resources.GetObject("copyToolStripMenuItem.Image");
             copyToolStripMenuItem.Name = "copyToolStripMenuItem";
             copyToolStripMenuItem.ShortcutKeys = Keys.Control | Keys.C;
-            copyToolStripMenuItem.Size = new Size(184, 26);
+            copyToolStripMenuItem.Size = new Size(166, 22);
             copyToolStripMenuItem.Text = "Copy";
             // 
             // pasteToolStripMenuItem
@@ -346,20 +347,20 @@ namespace MarkdownPad
             pasteToolStripMenuItem.Image = (Image)resources.GetObject("pasteToolStripMenuItem.Image");
             pasteToolStripMenuItem.Name = "pasteToolStripMenuItem";
             pasteToolStripMenuItem.ShortcutKeys = Keys.Control | Keys.V;
-            pasteToolStripMenuItem.Size = new Size(184, 26);
+            pasteToolStripMenuItem.Size = new Size(166, 22);
             pasteToolStripMenuItem.Text = "Paste";
             // 
             // editToolStripSeparator2
             // 
             editToolStripSeparator2.Name = "editToolStripSeparator2";
-            editToolStripSeparator2.Size = new Size(181, 6);
+            editToolStripSeparator2.Size = new Size(163, 6);
             // 
             // selectAllToolStripMenuItem
             // 
             selectAllToolStripMenuItem.Image = (Image)resources.GetObject("selectAllToolStripMenuItem.Image");
             selectAllToolStripMenuItem.Name = "selectAllToolStripMenuItem";
             selectAllToolStripMenuItem.ShortcutKeys = Keys.Control | Keys.A;
-            selectAllToolStripMenuItem.Size = new Size(184, 26);
+            selectAllToolStripMenuItem.Size = new Size(166, 22);
             selectAllToolStripMenuItem.Text = "Select All";
             // 
             // formatToolStripMenuItem
@@ -488,6 +489,7 @@ namespace MarkdownPad
             // 
             // helpToolStripMenuItem
             // 
+            helpToolStripMenuItem.DropDownItems.AddRange(new ToolStripItem[] { aboutToolStripMenuItem });
             helpToolStripMenuItem.Name = "helpToolStripMenuItem";
             helpToolStripMenuItem.Size = new Size(44, 20);
             helpToolStripMenuItem.Text = "Help";
@@ -839,6 +841,14 @@ namespace MarkdownPad
             messageStatusLabel.Size = new Size(39, 22);
             messageStatusLabel.Text = "Ready";
             // 
+            // aboutToolStripMenuItem
+            // 
+            aboutToolStripMenuItem.Image = (Image)resources.GetObject("aboutToolStripMenuItem.Image");
+            aboutToolStripMenuItem.Name = "aboutToolStripMenuItem";
+            aboutToolStripMenuItem.Size = new Size(184, 26);
+            aboutToolStripMenuItem.Text = "About...";
+            aboutToolStripMenuItem.Click += aboutToolStripMenuItem_Click;
+            // 
             // frmMain
             // 
             AutoScaleDimensions = new SizeF(7F, 15F);
@@ -967,5 +977,6 @@ namespace MarkdownPad
         private ToolStripSeparator toolStripSeparator7;
         private ToolStripLabel messageStatusLabel;
         private ToolStripMenuItem helpToolStripMenuItem;
+        private ToolStripMenuItem aboutToolStripMenuItem;
     }
 }

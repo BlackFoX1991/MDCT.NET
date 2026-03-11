@@ -1353,4 +1353,10 @@ public partial class frmMain : Form
             // Keep application shutdown non-blocking even if the session file cannot be written.
         }
     }
+
+    private void aboutToolStripMenuItem_Click(object sender, EventArgs e)
+    {
+        aboutDiag abt = new();
+            abt.ShowDialog(this);
+    }
 }
