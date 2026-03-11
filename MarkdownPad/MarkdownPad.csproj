@@ -6,7 +6,12 @@
     <Nullable>enable</Nullable>
     <UseWindowsForms>true</UseWindowsForms>
     <ImplicitUsings>enable</ImplicitUsings>
+    <ApplicationIcon>assets\icon_logo\mdct_multisize.ico</ApplicationIcon>
   </PropertyGroup>
+
+  <ItemGroup>
+    <Content Include="assets\icon_logo\mdct_multisize.ico" />
+  </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\MarkdownControlNET\MarkdownControlNET.csproj" />
