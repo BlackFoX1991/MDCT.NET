@@ -397,9 +397,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         get => _documentBasePath;
         set
         {
-            string? normalized = string.IsNullOrWhiteSpace(value)
-                ? null
-                : Path.GetFullPath(value);
+            string? normalized = NormalizeDocumentBasePath(value);
 
             if (string.Equals(_documentBasePath, normalized, StringComparison.OrdinalIgnoreCase))
                 return;
@@ -415,6 +413,13 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
             RepositionCellEditor();
             Invalidate();
         }
+    }
+
+    private static string? NormalizeDocumentBasePath(string? value)
+    {
+        return string.IsNullOrWhiteSpace(value)
+            ? null
+            : Path.GetFullPath(value);
     }
 
 
@@ -625,23 +630,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
     public string Markdown
     {
         get => _doc.ToMarkdown();
-        set
-        {
-            EndCellEdit(discard: false, move: CellMove.None);
-
-            _doc.LoadMarkdown(value ?? string.Empty);
-            EnsureTrailingEditableLineAfterTerminalTable();
-
-            _rawTableStartLines.Clear();
-            _rawCodeFenceStartLine = null;
-
-            _state.Restore(new MarkdownPosition(0, 0), null, _doc);
-            _undo.Clear();
-            _redo.Clear();
-
-            RefreshLayoutAfterDocumentChange();
-            Invalidate();
-        }
+        set => SetMarkdownCore(value, resetUndoStacks: true);
     }
 
     /// <summary>
@@ -662,6 +651,21 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
     public override void ResetText()
     {
         Markdown = string.Empty;
+    }
+
+    public void LoadDocument(string? markdown, string? documentBasePath, bool resetUndoStacks = true)
+    {
+        string? normalizedBasePath = NormalizeDocumentBasePath(documentBasePath);
+        bool basePathChanged = !string.Equals(_documentBasePath, normalizedBasePath, StringComparison.OrdinalIgnoreCase);
+
+        if (basePathChanged)
+        {
+            _documentBasePath = normalizedBasePath;
+            ClearImageCache();
+            InvalidateLayoutContext();
+        }
+
+        SetMarkdownCore(markdown, resetUndoStacks);
     }
 
     // verhindert Designer-Serialisierung von Text zusätzlich
@@ -1079,7 +1083,10 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
     }
 
     private bool CanApplyInitialLayout()
-        => IsHandleCreated && ClientSize.Width > 0 && ClientSize.Height > 0;
+        => IsHandleCreated
+           && Visible
+           && ClientSize.Width > 0
+           && ClientSize.Height > 0;
 
     private bool TryApplyPendingInitialRefresh()
     {
@@ -1363,7 +1370,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
     private bool IsPointOverImagePreview(Point contentPoint)
     {
         var pos = _layout.HitTestText(contentPoint);
-        LayoutLine? line = _layout.GetLine(pos.Line);
+        LayoutLine? line = _layout.GetPreparedLine(pos.Line);
         if (line is null || !line.IsImagePreview)
             return false;
 
@@ -1586,7 +1593,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         hit = default;
 
         MarkdownPosition pos = _layout.HitTestText(contentPoint);
-        LayoutLine? line = _layout.GetLine(pos.Line);
+        LayoutLine? line = _layout.GetPreparedLine(pos.Line);
         if (line is null || line.IsImagePreview)
             return false;
 
@@ -1670,7 +1677,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         hitRect = Rectangle.Empty;
 
         var pos = _layout.HitTestText(contentPoint);
-        LayoutLine? candidate = _layout.GetLine(pos.Line);
+        LayoutLine? candidate = _layout.GetPreparedLine(pos.Line);
         if (candidate is null) return false;
 
         if (contentPoint.Y < candidate.Bounds.Top - 1 || contentPoint.Y > candidate.Bounds.Bottom + 1)
@@ -3552,7 +3559,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         // A) Text-/Line-Selection wie bisher
         for (int srcLine = start.Line; srcLine <= end.Line; srcLine++)
         {
-            LayoutLine? line = _layout.GetLine(srcLine);
+            LayoutLine? line = _layout.GetPreparedLine(srcLine);
             if (line is null) continue;
             if (line.Bounds.Bottom < viewport.Top || line.Bounds.Top > viewport.Bottom) continue;
 
@@ -3768,7 +3775,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
 
     private void DrawCaret(Graphics g)
     {
-        LayoutLine? line = _layout.GetLine(_state.Caret.Line);
+        LayoutLine? line = _layout.GetPreparedLine(_state.Caret.Line);
         if (line is null) return;
 
         int srcCol = Math.Clamp(_state.Caret.Column, 0, line.SourceText.Length);
@@ -3844,7 +3851,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
 
         if (e.KeyCode == Keys.Back)
         {
-            LayoutLine? line = _layout.GetLine(lineIndex);
+            LayoutLine? line = _layout.GetPreparedLine(lineIndex);
             if (line is null) return false;
 
             int srcCol = Math.Clamp(_state.Caret.Column, 0, line.SourceText.Length);
@@ -3882,7 +3889,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
 
     private bool IsCaretAtVisualStart()
     {
-        LayoutLine? line = _layout.GetLine(_state.Caret.Line);
+        LayoutLine? line = _layout.GetPreparedLine(_state.Caret.Line);
         if (line is null) return false;
 
         int srcCol = Math.Clamp(_state.Caret.Column, 0, line.SourceText.Length);
@@ -4249,6 +4256,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
             _monoFont,
             DeviceDpi,
             DeviceDpi,
+            _state.Caret.Line,
             TryGetCachedImageSize,
             _rawTableStartLines,
             rawCodeFenceStarts,
@@ -4468,7 +4476,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
     {
         if (_cellEditor is not null) return;
 
-        LayoutLine? line = _layout.GetLine(_state.Caret.Line);
+        LayoutLine? line = _layout.GetPreparedLine(_state.Caret.Line);
         if (line is null) return;
 
         int srcCol = Math.Clamp(_state.Caret.Column, 0, line.SourceText.Length);
@@ -4670,7 +4678,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
 
     private float MeasureVisualPrefix(LayoutLine line, int visualCols)
     {
-        float[] offsets = line.VisualOffsets;
+        float[] offsets = _layout.GetVisualOffsets(line);
         if (offsets.Length == 0)
             return 0;
 
@@ -4940,7 +4948,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
 
     private int GetVisualLineStartSourceColumn(int sourceLine)
     {
-        LayoutLine? line = _layout.GetLine(sourceLine);
+        LayoutLine? line = _layout.GetPreparedLine(sourceLine);
         if (line is null) return 0;
 
         int[] v2s = line.Projection.VisualToSource;
@@ -4951,7 +4959,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
 
     private int GetVisualLineEndSourceColumn(int sourceLine)
     {
-        LayoutLine? line = _layout.GetLine(sourceLine);
+        LayoutLine? line = _layout.GetPreparedLine(sourceLine);
         if (line is null) return _doc.GetLineLength(sourceLine);
 
         int[] v2s = line.Projection.VisualToSource;

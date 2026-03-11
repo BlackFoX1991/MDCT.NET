@@ -82,9 +82,8 @@ public sealed class padTab : TabPage
 
     private void ApplyDocumentState(string markdown, string? filePath, bool modified)
     {
-        Editor.Markdown = markdown;
         FilePath = string.IsNullOrWhiteSpace(filePath) ? null : Path.GetFullPath(filePath);
-        Editor.DocumentBasePath = FilePath is null ? null : Path.GetDirectoryName(FilePath);
+        Editor.LoadDocument(markdown, FilePath is null ? null : Path.GetDirectoryName(FilePath), resetUndoStacks: true);
         Modified = modified;
         UpdatePresentation();
     }

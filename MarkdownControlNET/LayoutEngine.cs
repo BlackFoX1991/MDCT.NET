@@ -19,17 +19,18 @@ public sealed class LayoutLine
 {
     public required int SourceLine { get; init; }
     public required string SourceText { get; init; }
-    public required VisualProjection Projection { get; init; }
-    public required float[] VisualOffsets { get; init; }
-    public required Rectangle Bounds { get; init; }
+    public required VisualProjection Projection { get; set; }
+    public required float[] VisualOffsets { get; set; }
+    public required Rectangle Bounds { get; set; }
     public required int TextX { get; init; }
-    public required int TextWidth { get; init; }
+    public required int TextWidth { get; set; }
     public required MarkdownBlockKind Kind { get; init; }
     public required int HeadingLevel { get; init; }
     public required LineFontRole FontRole { get; init; }
 
     // Already inline-parsed runs (without markdown markers)
-    public required IReadOnlyList<InlineRun> InlineRuns { get; init; }
+    public required IReadOnlyList<InlineRun> InlineRuns { get; set; }
+    public bool IsRealized { get; set; }
 
     public bool IsImagePreview { get; init; }
     public string ImageAltText { get; init; } = string.Empty;
@@ -71,12 +72,13 @@ public sealed class TableLayout
     private readonly string[,] _cellTexts;
     private readonly IReadOnlyList<InlineRun>[,] _cellRuns;
     private readonly TableAlignment[] _colAlignments;
+    private Rectangle _bounds;
 
     public int StartLine { get; }
     public int EndLine { get; }
     public int Rows { get; }
     public int Cols { get; }
-    public Rectangle Bounds { get; }
+    public Rectangle Bounds => _bounds;
     public TableBlock Block { get; }
 
     public TableLayout(
@@ -95,7 +97,7 @@ public sealed class TableLayout
         EndLine = endLine;
         Rows = rows;
         Cols = cols;
-        Bounds = bounds;
+        _bounds = bounds;
         Block = block;
         _cellRects = cellRects;
         _cellTexts = cellTexts;
@@ -116,16 +118,44 @@ public sealed class TableLayout
             for (int c = 0; c < Cols; c++)
                 yield return (r, c, _cellRects[r, c], _cellTexts[r, c]);
     }
+
+    public void ShiftY(int deltaY)
+    {
+        if (deltaY == 0)
+            return;
+
+        _bounds = new Rectangle(_bounds.X, _bounds.Y + deltaY, _bounds.Width, _bounds.Height);
+
+        for (int r = 0; r < Rows; r++)
+        {
+            for (int c = 0; c < Cols; c++)
+            {
+                Rectangle rect = _cellRects[r, c];
+                _cellRects[r, c] = new Rectangle(rect.X, rect.Y + deltaY, rect.Width, rect.Height);
+            }
+        }
+    }
 }
 
 public sealed class LayoutEngine
 {
     private readonly List<LayoutLine> _lines = new();
     private readonly Dictionary<int, LayoutLine> _lineBySource = new();
+    private readonly Dictionary<int, int> _lineIndexBySource = new();
     private readonly List<TableLayout> _tables = new();
     private readonly Dictionary<int, TableLayout> _tableByStartLine = new();
     private readonly HashSet<int> _tableSourceLines = new();
     private readonly Dictionary<string, InlineParseResult> _inlineParseCache = new(StringComparer.Ordinal);
+    private readonly Dictionary<int, ListItem> _listItemByLine = new();
+    private readonly Dictionary<int, ImageBlock> _imageByLine = new();
+    private readonly Dictionary<int, FootnoteDefinitionLine> _footnoteLineBySource = new();
+    private readonly Dictionary<int, FootnoteDefinitionBlock> _footnoteBlockBySourceLine = new();
+    private LineSemantic[] _semantics = Array.Empty<LineSemantic>();
+    private List<CodeFenceSpan> _fenceSpans = new();
+    private int[] _fenceSpanByLine = Array.Empty<int>();
+    private IReadOnlySet<int> _forceRawCodeFenceStarts = new HashSet<int>();
+    private IReadOnlySet<int> _forceRawLines = new HashSet<int>();
+    private IReadOnlySet<int> _forceRawInlineLines = new HashSet<int>();
 
     private int[] _lineTops = Array.Empty<int>();
     private int[] _tableTops = Array.Empty<int>();
@@ -136,8 +166,13 @@ public sealed class LayoutEngine
     private Func<string, Size?>? _imageSizeProvider;
     private MarkdownFootnoteIndex _footnoteIndex = MarkdownFootnoteIndex.Empty;
     private IReadOnlyDictionary<string, int> _footnoteDisplayNumbers = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+    private float _measurementDpiX = 96f;
+    private float _measurementDpiY = 96f;
 
     private int _sourceLineCount;
+    private int _maxContentWidth;
+    private Size _lastViewport = new(1, 1);
+    private DocumentModel? _currentDoc;
 
     public Size ContentSize { get; private set; } = new(1, 1);
 
@@ -491,6 +526,7 @@ public sealed class LayoutEngine
         Font monoFont,
         float dpiX,
         float dpiY,
+        int preferredSourceLine = 0,
         Func<string, Size?>? imageSizeProvider = null,
         IReadOnlySet<int>? forceRawTableStarts = null,
         IReadOnlySet<int>? forceRawCodeFenceStarts = null,
@@ -498,21 +534,37 @@ public sealed class LayoutEngine
         IReadOnlySet<int>? forceRawInlineLines = null)
     {
         _sourceLineCount = doc.LineCount;
+        _currentDoc = doc;
+        _lastViewport = viewport;
 
         _baseFont = baseFont;
         _boldFont = boldFont;
         _monoFont = monoFont;
         _imageSizeProvider = imageSizeProvider;
+        _measurementDpiX = Math.Max(1f, dpiX);
+        _measurementDpiY = Math.Max(1f, dpiY);
         _footnoteIndex = MarkdownFootnoteHelper.BuildIndex(doc.Lines);
         _footnoteDisplayNumbers = BuildFootnoteDisplayNumbers(doc, _footnoteIndex);
 
         _lines.Clear();
         _lineBySource.Clear();
+        _lineIndexBySource.Clear();
         _tables.Clear();
         _tableByStartLine.Clear();
         _tableSourceLines.Clear();
+        _listItemByLine.Clear();
+        _imageByLine.Clear();
+        _footnoteLineBySource.Clear();
+        _footnoteBlockBySourceLine.Clear();
         _lineTops = Array.Empty<int>();
         _tableTops = Array.Empty<int>();
+        _semantics = Array.Empty<LineSemantic>();
+        _fenceSpans.Clear();
+        _fenceSpanByLine = Array.Empty<int>();
+        _forceRawCodeFenceStarts = forceRawCodeFenceStarts ?? new HashSet<int>();
+        _forceRawLines = forceRawLines ?? new HashSet<int>();
+        _forceRawInlineLines = forceRawInlineLines ?? new HashSet<int>();
+        _maxContentWidth = Math.Max(1, viewport.Width);
 
         if (doc.LineCount == 0)
         {
@@ -527,28 +579,26 @@ public sealed class LayoutEngine
         measurementGraphics.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
 
         var semantics = BuildSemantics(doc);
+        _semantics = semantics;
 
         // Mapping SourceLine -> ListItem
-        var listItemByLine = new Dictionary<int, ListItem>();
         foreach (var lb in doc.Blocks.OfType<ListBlock>())
         {
             foreach (var it in lb.Items)
-                listItemByLine[it.SourceLine] = it;
+                _listItemByLine[it.SourceLine] = it;
         }
 
-        var imageByLine = doc.Blocks
-            .OfType<ImageBlock>()
-            .ToDictionary(block => block.StartLine);
+        foreach (ImageBlock image in doc.Blocks.OfType<ImageBlock>())
+            _imageByLine[image.StartLine] = image;
 
-        var footnoteLineBySource = doc.Blocks
-            .OfType<FootnoteDefinitionBlock>()
-            .SelectMany(block => block.Lines)
-            .ToDictionary(line => line.SourceLine);
-
-        var footnoteBlockBySourceLine = doc.Blocks
-            .OfType<FootnoteDefinitionBlock>()
-            .SelectMany(block => block.Lines.Select(line => (line.SourceLine, Block: block)))
-            .ToDictionary(x => x.SourceLine, x => x.Block);
+        foreach (FootnoteDefinitionBlock footnoteBlock in doc.Blocks.OfType<FootnoteDefinitionBlock>())
+        {
+            foreach (FootnoteDefinitionLine footnoteLine in footnoteBlock.Lines)
+            {
+                _footnoteLineBySource[footnoteLine.SourceLine] = footnoteLine;
+                _footnoteBlockBySourceLine[footnoteLine.SourceLine] = footnoteBlock;
+            }
+        }
 
         var tableStarts = new Dictionary<int, TableBlock>();
         foreach (var t in doc.Blocks.OfType<TableBlock>())
@@ -562,8 +612,9 @@ public sealed class LayoutEngine
                 _tableSourceLines.Add(i);
         }
 
-        var fenceSpans = BuildCodeFenceSpans(doc);
+        _fenceSpans = BuildCodeFenceSpans(doc);
         int[] fenceSpanByLine = Enumerable.Repeat(-1, doc.LineCount).ToArray();
+        _fenceSpanByLine = fenceSpanByLine;
 
         // Neutralize parser code fence (custom span logic is authoritative)
         for (int i = 0; i < doc.LineCount; i++)
@@ -580,9 +631,9 @@ public sealed class LayoutEngine
         }
 
         // Apply custom fence spans
-        for (int si = 0; si < fenceSpans.Count; si++)
+        for (int si = 0; si < _fenceSpans.Count; si++)
         {
-            var sp = fenceSpans[si];
+            var sp = _fenceSpans[si];
             for (int i = sp.StartLine; i <= sp.EndLine && i < doc.LineCount; i++)
             {
                 fenceSpanByLine[i] = si;
@@ -626,8 +677,8 @@ public sealed class LayoutEngine
             string source = doc.GetLine(lineIdx);
             var sem = semantics[lineIdx];
 
-            bool forceRawThisLine = forceRawLines?.Contains(lineIdx) == true;
-            bool forceRawInlineThisLine = forceRawInlineLines?.Contains(lineIdx) == true;
+            bool forceRawThisLine = _forceRawLines.Contains(lineIdx);
+            bool forceRawInlineThisLine = _forceRawInlineLines.Contains(lineIdx);
 
             // Parser says Table, but raw mode is active -> render as normal text
             if (sem.Kind == MarkdownBlockKind.Table)
@@ -662,6 +713,7 @@ public sealed class LayoutEngine
 
             try
             {
+                bool eagerLineRealization = ShouldRealizeLineEagerly(lineIdx, y, viewport, preferredSourceLine);
                 int left = sem.Kind switch
                 {
                     MarkdownBlockKind.Quote => 24,
@@ -673,6 +725,7 @@ public sealed class LayoutEngine
 
                 VisualProjection proj;
                 IReadOnlyList<InlineRun> runs;
+                bool lineRealized = true;
 
                 if (forceRawThisLine)
                 {
@@ -689,14 +742,14 @@ public sealed class LayoutEngine
                 }
                 else if (sem.Kind == MarkdownBlockKind.CodeFence)
                 {
-                    int spanIdx = fenceSpanByLine[lineIdx];
+                    int spanIdx = _fenceSpanByLine[lineIdx];
                     bool hasSpan = spanIdx >= 0;
                     bool rawFence = false;
 
                     if (hasSpan)
                     {
-                        var span = fenceSpans[spanIdx];
-                        rawFence = forceRawCodeFenceStarts?.Contains(span.StartLine) == true;
+                        var span = _fenceSpans[spanIdx];
+                        rawFence = _forceRawCodeFenceStarts.Contains(span.StartLine);
                     }
 
                     if (!hasSpan || rawFence)
@@ -706,7 +759,7 @@ public sealed class LayoutEngine
                     }
                     else
                     {
-                        var span = fenceSpans[spanIdx];
+                        var span = _fenceSpans[spanIdx];
                         var hideRanges = new List<(int Start, int Length)>(2);
 
                         // Hide only markers, keep content visible
@@ -732,7 +785,7 @@ public sealed class LayoutEngine
                     proj = VisualProjection.HidePrefix(source, source.Length);
                     runs = Array.Empty<InlineRun>();
                 }
-                else if (sem.Kind == MarkdownBlockKind.Image && imageByLine.TryGetValue(lineIdx, out var image))
+                else if (sem.Kind == MarkdownBlockKind.Image && _imageByLine.TryGetValue(lineIdx, out var image))
                 {
                     imageAltText = image.AltText;
                     imageSource = image.Source;
@@ -751,7 +804,7 @@ public sealed class LayoutEngine
                         isImagePreview = true;
                     }
                 }
-                else if (sem.Kind == MarkdownBlockKind.List && listItemByLine.TryGetValue(lineIdx, out var li))
+                else if (sem.Kind == MarkdownBlockKind.List && _listItemByLine.TryGetValue(lineIdx, out var li))
                 {
                     isTaskListItem = li.IsTask;
                     isTaskChecked = li.IsChecked;
@@ -771,15 +824,29 @@ public sealed class LayoutEngine
                     {
                         // Ordered/unordered/nested/task visual + stable source mapping
                         proj = BuildListProjection(source, li);
-
-                        InlineParseResult inline = ApplyFootnotePresentation(ParseInlineCached(proj.DisplayText));
-                        proj = ComposeProjection(proj, inline);
-                        runs = inline.Runs;
+                        if (MightNeedInlineParsing(proj.DisplayText))
+                        {
+                            if (eagerLineRealization)
+                            {
+                                InlineParseResult inline = ApplyFootnotePresentation(ParseInlineCached(proj.DisplayText));
+                                proj = ComposeProjection(proj, inline);
+                                runs = inline.Runs;
+                            }
+                            else
+                            {
+                                runs = CreatePlainRuns(proj.DisplayText);
+                                lineRealized = false;
+                            }
+                        }
+                        else
+                        {
+                            runs = CreatePlainRuns(proj.DisplayText);
+                        }
                     }
                 }
                 else if (sem.Kind == MarkdownBlockKind.FootnoteDefinition &&
-                         footnoteLineBySource.TryGetValue(lineIdx, out var footnoteLine) &&
-                         footnoteBlockBySourceLine.TryGetValue(lineIdx, out var footnoteBlock))
+                         _footnoteLineBySource.TryGetValue(lineIdx, out var footnoteLine) &&
+                         _footnoteBlockBySourceLine.TryGetValue(lineIdx, out var footnoteBlock))
                 {
                     if (forceRawThisLine)
                     {
@@ -798,13 +865,21 @@ public sealed class LayoutEngine
                             ? CreateIdentityProjection(source)
                             : BuildProjectionHidingRanges(source, hideRanges);
 
-                        InlineParseResult inline = ApplyFootnoteDefinitionPresentation(
-                            ParseInlineCached(proj.DisplayText),
-                            footnoteBlock,
-                            isFirstLine: footnoteLine.IsFirstLine,
-                            isLastLine: lineIdx == footnoteBlock.EndLine);
-                        proj = ComposeProjection(proj, inline);
-                        runs = inline.Runs;
+                        if (eagerLineRealization)
+                        {
+                            InlineParseResult inline = ApplyFootnoteDefinitionPresentation(
+                                ParseInlineCached(proj.DisplayText),
+                                footnoteBlock,
+                                isFirstLine: footnoteLine.IsFirstLine,
+                                isLastLine: lineIdx == footnoteBlock.EndLine);
+                            proj = ComposeProjection(proj, inline);
+                            runs = inline.Runs;
+                        }
+                        else
+                        {
+                            runs = CreatePlainRuns(proj.DisplayText);
+                            lineRealized = false;
+                        }
                     }
                 }
                 else
@@ -824,9 +899,26 @@ public sealed class LayoutEngine
                         }
                         else
                         {
-                            InlineParseResult inline = ApplyFootnotePresentation(ParseInlineCached(prefixProj.DisplayText));
-                            proj = ComposeProjection(prefixProj, inline);
-                            runs = inline.Runs;
+                            if (MightNeedInlineParsing(prefixProj.DisplayText))
+                            {
+                                if (eagerLineRealization)
+                                {
+                                    InlineParseResult inline = ApplyFootnotePresentation(ParseInlineCached(prefixProj.DisplayText));
+                                    proj = ComposeProjection(prefixProj, inline);
+                                    runs = inline.Runs;
+                                }
+                                else
+                                {
+                                    proj = prefixProj;
+                                    runs = CreatePlainRuns(proj.DisplayText);
+                                    lineRealized = false;
+                                }
+                            }
+                            else
+                            {
+                                proj = prefixProj;
+                                runs = CreatePlainRuns(proj.DisplayText);
+                            }
                         }
                     }
                     else
@@ -838,9 +930,12 @@ public sealed class LayoutEngine
                     }
                 }
 
-                float[] visualOffsets = BuildVisualOffsets(proj.DisplayText, runs, measureFont, measurementGraphics);
                 int lineHeight;
                 int textWidth;
+                bool eagerVisualOffsets = ShouldMeasureVisualOffsetsEagerly(lineIdx, y, viewport, preferredSourceLine);
+                float[] visualOffsets = eagerVisualOffsets
+                    ? BuildVisualOffsets(proj.DisplayText, runs, measureFont, measurementGraphics)
+                    : Array.Empty<float>();
 
                 if (isImagePreview)
                 {
@@ -851,6 +946,9 @@ public sealed class LayoutEngine
                 else
                 {
                     lineHeight = MeasureInlineRunsContentHeight(runs, measureFont, measurementGraphics) + 4;
+                    if (!lineRealized && proj.DisplayText.Contains("![", StringComparison.Ordinal))
+                        lineHeight = Math.Max(lineHeight, InlineImageMetrics.MaxHeight + 4);
+
                     if (sem.Kind == MarkdownBlockKind.Heading)
                         lineHeight += 2;
                     else if (isHorizontalRule && !forceRawThisLine)
@@ -858,7 +956,12 @@ public sealed class LayoutEngine
 
                     textWidth = (isHorizontalRule && !forceRawThisLine)
                         ? Math.Max(1, viewport.Width - left - 12)
-                        : Math.Max(1, (int)Math.Ceiling(GetVisualWidth(visualOffsets)));
+                        : Math.Max(
+                            1,
+                            (int)Math.Ceiling(
+                                eagerVisualOffsets
+                                    ? GetVisualWidth(visualOffsets)
+                                    : MeasureRenderedLineWidth(proj.DisplayText, runs, measureFont, measurementGraphics)));
                 }
 
                 var line = new LayoutLine
@@ -874,6 +977,7 @@ public sealed class LayoutEngine
                     HeadingLevel = sem.HeadingLevel,
                     FontRole = role,
                     InlineRuns = runs,
+                    IsRealized = lineRealized,
                     IsImagePreview = isImagePreview,
                     ImageAltText = imageAltText,
                     ImageSource = imageSource,
@@ -892,6 +996,7 @@ public sealed class LayoutEngine
 
                 _lines.Add(line);
                 _lineBySource[lineIdx] = line;
+                _lineIndexBySource[lineIdx] = _lines.Count - 1;
 
                 y += lineHeight;
                 maxWidth = Math.Max(maxWidth, left + textWidth + 24);
@@ -923,7 +1028,10 @@ public sealed class LayoutEngine
                 yield break;
 
             if (line.Bounds.Bottom >= viewport.Top && line.Bounds.Top <= viewport.Bottom)
+            {
+                EnsureLineRealized(line);
                 yield return line;
+            }
         }
     }
 
@@ -946,6 +1054,17 @@ public sealed class LayoutEngine
 
     public LayoutLine? GetLine(int sourceLine)
         => _lineBySource.TryGetValue(sourceLine, out var line) ? line : null;
+
+    public LayoutLine? GetPreparedLine(int sourceLine)
+    {
+        if (!_lineBySource.TryGetValue(sourceLine, out LayoutLine? line))
+            return null;
+
+        EnsureLineRealized(line);
+        return line;
+    }
+
+    public float[] GetVisualOffsets(LayoutLine line) => EnsureVisualOffsets(line);
 
     public bool IsTableSourceLine(int sourceLine) => _tableSourceLines.Contains(sourceLine);
 
@@ -1028,8 +1147,9 @@ public sealed class LayoutEngine
             }
         }
 
+        float[] visualOffsets = EnsureVisualOffsets(best);
         float localX = contentPoint.X - best.TextX;
-        int visCol = ColumnFromX(best.VisualOffsets, localX);
+        int visCol = ColumnFromX(visualOffsets, localX);
 
         visCol = Math.Clamp(visCol, 0, best.Projection.VisualToSource.Length - 1);
 
@@ -1077,17 +1197,30 @@ public sealed class LayoutEngine
             for (int r = 0; r < rows; r++)
             {
                 string raw = model.Rows[r][c] ?? string.Empty;
-                InlineParseResult parsed = ApplyFootnotePresentation(ParseInlineCached(raw));
+                IReadOnlyList<InlineRun> parsedRuns;
+                string parsedText;
 
-                texts[r, c] = parsed.Text;
-                runs[r, c] = parsed.Runs;
+                if (MightNeedInlineParsing(raw))
+                {
+                    InlineParseResult parsed = ApplyFootnotePresentation(ParseInlineCached(raw));
+                    parsedText = parsed.Text;
+                    parsedRuns = parsed.Runs;
+                }
+                else
+                {
+                    parsedText = raw;
+                    parsedRuns = CreatePlainRuns(raw);
+                }
+
+                texts[r, c] = parsedText;
+                runs[r, c] = parsedRuns;
 
                 Font measureFont = (r == 0) ? _boldFont : _baseFont;
 
-                int contentW = parsed.Runs.Count > 0
-                    ? MeasureInlineRunsWidthForTableLayout(parsed.Runs, measureFont, graphics)
-                    : MeasureWidth(graphics, parsed.Text, measureFont);
-                int contentH = MeasureInlineRunsContentHeight(parsed.Runs, measureFont, graphics);
+                int contentW = parsedRuns.Count > 0
+                    ? MeasureInlineRunsWidthForTableLayout(parsedRuns, measureFont, graphics)
+                    : MeasureWidth(graphics, parsedText, measureFont);
+                int contentH = MeasureInlineRunsContentHeight(parsedRuns, measureFont, graphics);
 
                 w = Math.Max(w, contentW + cellPadX * 2);
                 rowHeights[r] = Math.Max(rowHeights[r], contentH + cellPadY * 2);
@@ -1312,6 +1445,202 @@ public sealed class LayoutEngine
         _ => false
     };
 
+    private static bool MightNeedInlineParsing(string text)
+    {
+        if (string.IsNullOrEmpty(text))
+            return false;
+
+        if (text.Contains("http://", StringComparison.OrdinalIgnoreCase) ||
+            text.Contains("https://", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        return text.IndexOfAny(['`', '*', '_', '~', '[', '!', '\\']) >= 0;
+    }
+
+    private static IReadOnlyList<InlineRun> CreatePlainRuns(string text)
+    {
+        return string.IsNullOrEmpty(text)
+            ? Array.Empty<InlineRun>()
+            : new[] { new InlineRun(text, InlineStyle.None) };
+    }
+
+    private void BuildRealizedLinePresentation(
+        int lineIdx,
+        string source,
+        LineSemantic sem,
+        out VisualProjection proj,
+        out IReadOnlyList<InlineRun> runs,
+        out bool isImagePreview,
+        out string imageAltText,
+        out string imageSource)
+    {
+        bool forceRawThisLine = _forceRawLines.Contains(lineIdx);
+        bool forceRawInlineThisLine = _forceRawInlineLines.Contains(lineIdx);
+        bool isHorizontalRule = IsHorizontalRuleKind(sem.Kind);
+        bool isAdmonitionMarkerLine =
+            sem.Kind == MarkdownBlockKind.Quote &&
+            sem.QuoteAdmonition != AdmonitionKind.None &&
+            sem.IsAdmonitionMarkerLine;
+
+        isImagePreview = false;
+        imageAltText = string.Empty;
+        imageSource = string.Empty;
+
+        if (forceRawThisLine)
+        {
+            proj = CreateIdentityProjection(source);
+            runs = CreatePlainRuns(proj.DisplayText);
+            return;
+        }
+
+        if (isHorizontalRule)
+        {
+            proj = VisualProjection.HidePrefix(source, source.Length);
+            runs = Array.Empty<InlineRun>();
+            return;
+        }
+
+        if (sem.Kind == MarkdownBlockKind.CodeFence)
+        {
+            int spanIdx = _fenceSpanByLine[lineIdx];
+            bool hasSpan = spanIdx >= 0;
+            bool rawFence = false;
+
+            if (hasSpan)
+            {
+                CodeFenceSpan span = _fenceSpans[spanIdx];
+                rawFence = _forceRawCodeFenceStarts.Contains(span.StartLine);
+            }
+
+            if (!hasSpan || rawFence)
+            {
+                proj = CreateIdentityProjection(source);
+            }
+            else
+            {
+                CodeFenceSpan span = _fenceSpans[spanIdx];
+                var hideRanges = new List<(int Start, int Length)>(2);
+
+                if (lineIdx == span.StartLine && span.StartMarkerCol >= 0 && span.StartMarkerLen > 0)
+                    hideRanges.Add((span.StartMarkerCol, span.StartMarkerLen));
+
+                if (lineIdx == span.EndLine && span.EndMarkerCol >= 0 && span.EndMarkerLen > 0)
+                    hideRanges.Add((span.EndMarkerCol, span.EndMarkerLen));
+
+                proj = hideRanges.Count == 0
+                    ? CreateIdentityProjection(source)
+                    : BuildProjectionHidingRanges(source, hideRanges);
+            }
+
+            runs = CreatePlainRuns(proj.DisplayText);
+            return;
+        }
+
+        if (isAdmonitionMarkerLine)
+        {
+            proj = VisualProjection.HidePrefix(source, source.Length);
+            runs = Array.Empty<InlineRun>();
+            return;
+        }
+
+        if (sem.Kind == MarkdownBlockKind.Image && _imageByLine.TryGetValue(lineIdx, out ImageBlock? image))
+        {
+            imageAltText = image.AltText;
+            imageSource = image.Source;
+
+            if (forceRawInlineThisLine)
+            {
+                proj = CreateIdentityProjection(source);
+                runs = CreatePlainRuns(proj.DisplayText);
+            }
+            else
+            {
+                proj = VisualProjection.HidePrefix(source, source.Length);
+                runs = Array.Empty<InlineRun>();
+                isImagePreview = true;
+            }
+
+            return;
+        }
+
+        if (sem.Kind == MarkdownBlockKind.List && _listItemByLine.TryGetValue(lineIdx, out ListItem? listItem))
+        {
+            if (forceRawInlineThisLine)
+            {
+                proj = CreateIdentityProjection(source);
+                runs = CreatePlainRuns(proj.DisplayText);
+            }
+            else
+            {
+                proj = BuildListProjection(source, listItem);
+                if (MightNeedInlineParsing(proj.DisplayText))
+                {
+                    InlineParseResult inline = ApplyFootnotePresentation(ParseInlineCached(proj.DisplayText));
+                    proj = ComposeProjection(proj, inline);
+                    runs = inline.Runs;
+                }
+                else
+                {
+                    runs = CreatePlainRuns(proj.DisplayText);
+                }
+            }
+
+            return;
+        }
+
+        if (sem.Kind == MarkdownBlockKind.FootnoteDefinition &&
+            _footnoteLineBySource.TryGetValue(lineIdx, out FootnoteDefinitionLine? footnoteLine) &&
+            _footnoteBlockBySourceLine.TryGetValue(lineIdx, out FootnoteDefinitionBlock? footnoteBlock))
+        {
+            if (forceRawThisLine)
+            {
+                proj = CreateIdentityProjection(source);
+                runs = CreatePlainRuns(proj.DisplayText);
+            }
+            else
+            {
+                var hideRanges = new List<(int Start, int Length)>(1);
+                if (footnoteLine.ContentStartColumn > 0)
+                    hideRanges.Add((0, footnoteLine.ContentStartColumn));
+
+                proj = hideRanges.Count == 0
+                    ? CreateIdentityProjection(source)
+                    : BuildProjectionHidingRanges(source, hideRanges);
+
+                InlineParseResult inline = ApplyFootnoteDefinitionPresentation(
+                    ParseInlineCached(proj.DisplayText),
+                    footnoteBlock,
+                    isFirstLine: footnoteLine.IsFirstLine,
+                    isLastLine: lineIdx == footnoteBlock.EndLine);
+                proj = ComposeProjection(proj, inline);
+                runs = inline.Runs;
+            }
+
+            return;
+        }
+
+        VisualProjection prefixProj = ProjectionFactory.Build(sem.Kind, source);
+        if (!SupportsInlineFormatting(sem.Kind) || forceRawInlineThisLine)
+        {
+            proj = prefixProj;
+            runs = CreatePlainRuns(proj.DisplayText);
+            return;
+        }
+
+        if (MightNeedInlineParsing(prefixProj.DisplayText))
+        {
+            InlineParseResult inline = ApplyFootnotePresentation(ParseInlineCached(prefixProj.DisplayText));
+            proj = ComposeProjection(prefixProj, inline);
+            runs = inline.Runs;
+            return;
+        }
+
+        proj = prefixProj;
+        runs = CreatePlainRuns(proj.DisplayText);
+    }
+
     private static VisualProjection ComposeProjection(VisualProjection outer, InlineParseResult inner)
     {
         int srcN = outer.SourceToVisual.Length - 1;
@@ -1525,6 +1854,164 @@ public sealed class LayoutEngine
         }
 
         return height;
+    }
+
+    private bool ShouldRealizeLineEagerly(int sourceLine, int topY, Size viewport, int preferredSourceLine)
+    {
+        const int eagerViewportPadding = 1024;
+        const int eagerLineRadius = 160;
+
+        return topY <= viewport.Height + eagerViewportPadding
+            || Math.Abs(sourceLine - preferredSourceLine) <= eagerLineRadius;
+    }
+
+    private void EnsureLineRealized(LayoutLine line)
+    {
+        if (line.IsRealized || _currentDoc is null)
+            return;
+
+        using var measurementBitmap = new Bitmap(1, 1);
+        measurementBitmap.SetResolution(_measurementDpiX, _measurementDpiY);
+        using var measurementGraphics = Graphics.FromImage(measurementBitmap);
+        measurementGraphics.PageUnit = GraphicsUnit.Pixel;
+        measurementGraphics.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
+
+        LineSemantic sem = _semantics[line.SourceLine];
+        string source = line.SourceText;
+
+        if (sem.Kind == MarkdownBlockKind.Table)
+        {
+            sem.Kind = string.IsNullOrWhiteSpace(source)
+                ? MarkdownBlockKind.Blank
+                : MarkdownBlockKind.Paragraph;
+            sem.HeadingLevel = 0;
+        }
+
+        Font measureFont = ResolveLineMeasureFont(line.Kind, line.HeadingLevel, line.FontRole, out bool disposeMeasureFont);
+        try
+        {
+            BuildRealizedLinePresentation(
+                line.SourceLine,
+                source,
+                sem,
+                out VisualProjection projection,
+                out IReadOnlyList<InlineRun> runs,
+                out bool isImagePreview,
+                out string imageAltText,
+                out string imageSource);
+
+            float[] visualOffsets = BuildVisualOffsets(projection.DisplayText, runs, measureFont, measurementGraphics);
+            int lineHeight;
+            int textWidth;
+
+            if (isImagePreview)
+            {
+                Size imageSize = CalculateImagePreviewSize(imageSource, _lastViewport, line.TextX, _imageSizeProvider);
+                textWidth = Math.Max(1, imageSize.Width);
+                lineHeight = Math.Max(1, imageSize.Height + (ImagePreviewPaddingY * 2));
+            }
+            else
+            {
+                lineHeight = MeasureInlineRunsContentHeight(runs, measureFont, measurementGraphics) + 4;
+                if (line.Kind == MarkdownBlockKind.Heading)
+                    lineHeight += 2;
+                else if (IsHorizontalRuleKind(line.Kind) && !_forceRawLines.Contains(line.SourceLine))
+                    lineHeight = Math.Max(lineHeight, 14);
+
+                textWidth = IsHorizontalRuleKind(line.Kind) && !_forceRawLines.Contains(line.SourceLine)
+                    ? Math.Max(1, _lastViewport.Width - line.TextX - 12)
+                    : Math.Max(1, (int)Math.Ceiling(GetVisualWidth(visualOffsets)));
+            }
+
+            ApplyRealizedLine(line, projection, runs, visualOffsets, textWidth, lineHeight);
+            line.IsRealized = true;
+        }
+        finally
+        {
+            if (disposeMeasureFont)
+                measureFont.Dispose();
+        }
+    }
+
+    private void ApplyRealizedLine(
+        LayoutLine line,
+        VisualProjection projection,
+        IReadOnlyList<InlineRun> runs,
+        float[] visualOffsets,
+        int textWidth,
+        int lineHeight)
+    {
+        int oldHeight = line.Bounds.Height;
+        int deltaHeight = lineHeight - oldHeight;
+
+        line.Projection = projection;
+        line.InlineRuns = runs;
+        line.VisualOffsets = visualOffsets;
+        line.TextWidth = textWidth;
+        line.Bounds = new Rectangle(line.Bounds.X, line.Bounds.Y, Math.Max(1, textWidth), Math.Max(1, lineHeight));
+
+        _maxContentWidth = Math.Max(_maxContentWidth, line.TextX + textWidth + 24);
+
+        if (deltaHeight != 0 && _lineIndexBySource.TryGetValue(line.SourceLine, out int lineIndex))
+        {
+            for (int i = lineIndex + 1; i < _lines.Count; i++)
+            {
+                LayoutLine next = _lines[i];
+                next.Bounds = new Rectangle(next.Bounds.X, next.Bounds.Y + deltaHeight, next.Bounds.Width, next.Bounds.Height);
+                _lineTops[i] = next.Bounds.Top;
+            }
+
+            for (int i = 0; i < _tables.Count; i++)
+            {
+                TableLayout table = _tables[i];
+                if (table.Bounds.Top <= line.Bounds.Top)
+                    continue;
+
+                table.ShiftY(deltaHeight);
+                _tableTops[i] = table.Bounds.Top;
+            }
+        }
+
+        if (_lineIndexBySource.TryGetValue(line.SourceLine, out int updatedIndex))
+            _lineTops[updatedIndex] = line.Bounds.Top;
+
+        int contentHeight = Math.Max(_lastViewport.Height, ContentSize.Height + deltaHeight);
+        ContentSize = new Size(Math.Max(_lastViewport.Width, _maxContentWidth), contentHeight);
+    }
+
+    private bool ShouldMeasureVisualOffsetsEagerly(int sourceLine, int topY, Size viewport, int preferredSourceLine)
+    {
+        const int eagerViewportPadding = 1024;
+        const int eagerLineRadius = 160;
+
+        return topY <= viewport.Height + eagerViewportPadding
+            || Math.Abs(sourceLine - preferredSourceLine) <= eagerLineRadius;
+    }
+
+    private float[] EnsureVisualOffsets(LayoutLine line)
+    {
+        EnsureLineRealized(line);
+
+        if (line.VisualOffsets.Length > 0 || line.Projection.DisplayText.Length == 0)
+            return line.VisualOffsets;
+
+        using var measurementBitmap = new Bitmap(1, 1);
+        measurementBitmap.SetResolution(_measurementDpiX, _measurementDpiY);
+        using var measurementGraphics = Graphics.FromImage(measurementBitmap);
+        measurementGraphics.PageUnit = GraphicsUnit.Pixel;
+        measurementGraphics.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
+
+        Font measureFont = ResolveLineMeasureFont(line.Kind, line.HeadingLevel, line.FontRole, out bool disposeMeasureFont);
+        try
+        {
+            line.VisualOffsets = BuildVisualOffsets(line.Projection.DisplayText, line.InlineRuns, measureFont, measurementGraphics);
+            return line.VisualOffsets;
+        }
+        finally
+        {
+            if (disposeMeasureFont)
+                measureFont.Dispose();
+        }
     }
 
     private float[] BuildVisualOffsets(string displayText, IReadOnlyList<InlineRun> runs, Font baseFont, Graphics graphics)
