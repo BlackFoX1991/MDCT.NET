@@ -1142,8 +1142,8 @@ public partial class frmMain : Form
 
     private void Editor_MarkdownChanged(object? sender, MarkdownChangedEventArgs e)
     {
-        SetStatusMessage("Document changed");
-        UpdateUiState();
+        _statusMessage = "Document changed";
+        UpdateStatusBar();
     }
 
     private void Editor_FindRequested(object? sender, FindRequestedEventArgs e)

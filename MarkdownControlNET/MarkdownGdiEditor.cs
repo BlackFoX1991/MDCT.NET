@@ -46,6 +46,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
     private readonly List<UndoRecord> _undo = new();
     private readonly List<UndoRecord> _redo = new();
 
+
     private readonly System.Windows.Forms.Timer _caretTimer;
     private bool _caretVisible = true;
     private bool _mouseSelecting;
@@ -531,6 +532,13 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         Alignment = StringAlignment.Near,
         LineAlignment = StringAlignment.Near
     };
+
+    private const TextFormatFlags PlainTextDrawFlags =
+        TextFormatFlags.NoPadding |
+        TextFormatFlags.NoPrefix |
+        TextFormatFlags.SingleLine |
+        TextFormatFlags.PreserveGraphicsClipping |
+        TextFormatFlags.PreserveGraphicsTranslateTransform;
 
     private readonly record struct AdmonitionPalette(
         Color Bar,
@@ -1788,7 +1796,8 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
             return;
         }
 
-        ApplyDocumentEdit(() => _state.InsertText(_doc, e.KeyChar.ToString()));
+        if (!TryApplyFastSingleLineInsert(e.KeyChar.ToString()))
+            ApplyDocumentEdit(() => _state.InsertText(_doc, e.KeyChar.ToString()));
         e.Handled = true;
     }
 
@@ -1858,13 +1867,16 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
             case Keys.Back:
                 if (HandleBackspaceEnterTableRawSourceMode())
                     break;
-                ApplyDocumentEdit(() => _state.Backspace(_doc));
+                if (!TryApplyFastSingleLineBackspace())
+                    ApplyDocumentEdit(() => _state.Backspace(_doc));
                 break;
             case Keys.Delete:
-                ApplyDocumentEdit(() => _state.Delete(_doc));
+                if (!TryApplyFastSingleLineDelete())
+                    ApplyDocumentEdit(() => _state.Delete(_doc));
                 break;
             case Keys.Enter:
-                ApplyDocumentEdit(() => _state.NewLine(_doc));
+                if (!TryApplyFastPlainTextEnter())
+                    ApplyDocumentEdit(() => _state.NewLine(_doc));
                 break;
             case Keys.Tab:
                 ApplyDocumentEdit(() => shift
@@ -2705,7 +2717,13 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         e.Graphics.ResetTransform();
         e.Graphics.PageUnit = GraphicsUnit.Pixel;
         e.Graphics.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
-        e.Graphics.Clear(BackColor);
+
+        Rectangle dirtyClient = Rectangle.Intersect(e.ClipRectangle, new Rectangle(Point.Empty, ClientSize));
+        if (dirtyClient.Width <= 0 || dirtyClient.Height <= 0)
+            return;
+
+        using (var backBrush = new SolidBrush(BackColor))
+            e.Graphics.FillRectangle(backBrush, dirtyClient);
 
         e.Graphics.TranslateTransform(AutoScrollPosition.X, AutoScrollPosition.Y);
 
@@ -2715,20 +2733,35 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
             ClientSize.Width,
             ClientSize.Height);
 
-        e.Graphics.SetClip(viewport);
+        Rectangle paintBounds = Rectangle.Intersect(
+            viewport,
+            new Rectangle(
+                dirtyClient.X - AutoScrollPosition.X,
+                dirtyClient.Y - AutoScrollPosition.Y,
+                dirtyClient.Width,
+                dirtyClient.Height));
+
+        if (paintBounds.Width <= 0 || paintBounds.Height <= 0)
+            return;
+
+        e.Graphics.SetClip(paintBounds);
 
         // Draw content first
-        foreach (var line in _layout.GetVisibleLines(viewport))
+        foreach (var line in _layout.GetVisibleLines(paintBounds))
             DrawLine(e.Graphics, line);
 
-        foreach (var table in _layout.GetVisibleTables(viewport))
+        foreach (var table in _layout.GetVisibleTables(paintBounds))
             DrawTable(e.Graphics, table);
 
         // Then selection overlay
-        DrawSelection(e.Graphics, viewport);
+        DrawSelection(e.Graphics, paintBounds);
 
-        if (Focused && _caretVisible && _cellEditor is null)
+        if (Focused && _caretVisible && _cellEditor is null &&
+            TryGetCaretContentRectangle(_state.Caret, out Rectangle caretRect) &&
+            caretRect.IntersectsWith(paintBounds))
+        {
             DrawCaret(e.Graphics);
+        }
     }
 
     protected override void OnSystemColorsChanged(EventArgs e)
@@ -2858,6 +2891,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         else if (!string.IsNullOrEmpty(display))
         {
             DrawInlineRuns(g, line, new Point(line.TextX, line.Bounds.Top + 1));
+            DrawTaskCheckboxOverlay(g, line);
         }
     }
 
@@ -3493,6 +3527,8 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         float layoutHeight = Math.Max(64f, font.GetHeight(g) * 4f);
         var layoutRect = new RectangleF(0, 0, 100000f, layoutHeight);
 
+        using StringFormat format = (StringFormat)MeasureStringFormat.Clone();
+
         for (int batchStart = 1; batchStart <= text.Length; batchStart += maxRangesPerBatch)
         {
             int count = Math.Min(maxRangesPerBatch, text.Length - batchStart + 1);
@@ -3500,7 +3536,6 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
             for (int i = 0; i < count; i++)
                 ranges[i] = new CharacterRange(0, batchStart + i);
 
-            using StringFormat format = (StringFormat)MeasureStringFormat.Clone();
             format.SetMeasurableCharacterRanges(ranges);
 
             Region[] regions = g.MeasureCharacterRanges(text, font, layoutRect, format);
@@ -3547,6 +3582,13 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         if (string.IsNullOrEmpty(text)) return;
         using var brush = new SolidBrush(color);
         g.DrawString(text, font, brush, pt, DrawStringFormat);
+    }
+
+    private static void DrawTextGdiPlus(Graphics g, string text, Font font, float x, float y, Color color)
+    {
+        if (string.IsNullOrEmpty(text)) return;
+        using var brush = new SolidBrush(color);
+        g.DrawString(text, font, brush, x, y, DrawStringFormat);
     }
 
     private void DrawSelection(Graphics g, Rectangle viewport)
@@ -3706,7 +3748,13 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
 
     private bool TryGetTaskCheckboxRect(LayoutLine line, out Rectangle rect)
     {
-        rect = Rectangle.Empty;
+        return TryGetTaskCheckboxRects(line, out _, out rect);
+    }
+
+    private bool TryGetTaskCheckboxRects(LayoutLine line, out Rectangle drawRect, out Rectangle hitRect)
+    {
+        drawRect = Rectangle.Empty;
+        hitRect = Rectangle.Empty;
 
         if (line.Kind != MarkdownBlockKind.List || !line.IsTaskListItem)
             return false;
@@ -3733,14 +3781,39 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         float x1 = SnapVisualX(line.TextX + MeasureVisualPrefix(line, checkboxGlyphVisStart));
         float x2 = SnapVisualX(line.TextX + MeasureVisualPrefix(line, checkboxGlyphVisStart + 1));
 
+        drawRect = Rectangle.FromLTRB(
+            (int)Math.Floor(x1),
+            line.Bounds.Top + 1,
+            Math.Max((int)Math.Ceiling(x2), (int)Math.Floor(x1) + 1),
+            line.Bounds.Bottom - 1);
+
         const int padX = 4;
-        rect = Rectangle.FromLTRB(
+        hitRect = Rectangle.FromLTRB(
             (int)Math.Floor(x1) - padX,
             line.Bounds.Top,
             (int)Math.Ceiling(x2) + padX,
             line.Bounds.Bottom);
 
         return true;
+    }
+
+    private void DrawTaskCheckboxOverlay(Graphics g, LayoutLine line)
+    {
+        if (!TryGetTaskCheckboxRects(line, out Rectangle drawRect, out _))
+            return;
+
+        string glyph = line.IsTaskChecked ? "☑" : "☐";
+
+        using var backgroundBrush = new SolidBrush(BackColor);
+        g.FillRectangle(backgroundBrush, drawRect);
+
+        TextRenderer.DrawText(
+            g,
+            glyph,
+            GetRenderFont(line),
+            drawRect.Location,
+            ForeColor,
+            PlainTextDrawFlags);
     }
 
     private static bool RangesOverlap(int aStart, int aEnd, int bStart, int bEnd)
@@ -3775,18 +3848,64 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
 
     private void DrawCaret(Graphics g)
     {
-        LayoutLine? line = _layout.GetPreparedLine(_state.Caret.Line);
-        if (line is null) return;
+        if (!TryGetCaretContentRectangle(_state.Caret, out Rectangle caretRect))
+            return;
 
-        int srcCol = Math.Clamp(_state.Caret.Column, 0, line.SourceText.Length);
+        using var p = new Pen(ForeColor, 1f);
+        float x = caretRect.Left + ((caretRect.Width - 1) / 2f);
+        g.DrawLine(p, x, caretRect.Top, x, caretRect.Bottom);
+    }
+
+    private bool TryGetCaretContentRectangle(MarkdownPosition position, out Rectangle caretRect)
+    {
+        caretRect = Rectangle.Empty;
+
+        LayoutLine? line = _layout.GetPreparedLine(position.Line);
+        if (line is null)
+            return false;
+
+        int srcCol = Math.Clamp(position.Column, 0, line.SourceText.Length);
         int visCol = line.Projection.SourceToVisual[srcCol];
         string display = line.Projection.DisplayText;
         visCol = Math.Clamp(visCol, 0, display.Length);
 
-        float x = SnapVisualX(line.TextX + MeasureVisualPrefix(g, line, visCol));
+        int x = (int)Math.Round(SnapVisualX(line.TextX + MeasureVisualPrefix(line, visCol)));
+        int top = line.Bounds.Top + 2;
+        int height = Math.Max(1, line.Bounds.Height - 4);
 
-        using var p = new Pen(ForeColor, 1f);
-        g.DrawLine(p, x, line.Bounds.Top + 2, x, line.Bounds.Bottom - 2);
+        caretRect = new Rectangle(x - 1, top, 3, height);
+        return true;
+    }
+
+    private void InvalidateFastInsertRegion(
+        Rectangle oldLineBounds,
+        Rectangle newLineBounds,
+        Rectangle oldCaretBounds,
+        Rectangle newCaretBounds)
+    {
+        Rectangle dirty = Rectangle.Union(oldLineBounds, newLineBounds);
+
+        if (!oldCaretBounds.IsEmpty)
+            dirty = Rectangle.Union(dirty, oldCaretBounds);
+
+        if (!newCaretBounds.IsEmpty)
+            dirty = Rectangle.Union(dirty, newCaretBounds);
+
+        dirty = Rectangle.Inflate(dirty, 12, 4);
+        InvalidateContentRectangle(dirty);
+    }
+
+    private void InvalidateContentRectangle(Rectangle contentRect)
+    {
+        if (contentRect.Width <= 0 || contentRect.Height <= 0)
+            return;
+
+        Rectangle clientRect = ContentToClient(contentRect);
+        clientRect = Rectangle.Intersect(clientRect, new Rectangle(Point.Empty, ClientSize));
+        if (clientRect.Width <= 0 || clientRect.Height <= 0)
+            return;
+
+        Invalidate(clientRect, invalidateChildren: false);
     }
 
     /*private bool HandleShortcuts(KeyEventArgs e)
@@ -3924,7 +4043,534 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         EnsureCaretVisible();
         Invalidate();
 
-        MarkdownChanged?.Invoke(this, new MarkdownChangedEventArgs(_doc.ToMarkdown()));
+        MarkdownChanged?.Invoke(this, new MarkdownChangedEventArgs(_doc.ToMarkdown));
+    }
+
+    private bool TryApplyFastSingleLineInsert(string text)
+    {
+        if (string.IsNullOrEmpty(text) || text.IndexOf('\n') >= 0 || _state.HasSelection || ContainsFastPathUnsafeMarkdown(text))
+            return false;
+
+        EndCellEdit(discard: false, move: CellMove.None);
+
+        MarkdownPosition beforeCaret = _state.Caret;
+        MarkdownPosition? beforeAnchor = _state.Anchor;
+        int lineIndex = beforeCaret.Line;
+        if (lineIndex < 0 || lineIndex >= _doc.LineCount)
+            return false;
+
+        string oldLine = _doc.GetLine(lineIndex);
+        if (!CanUseFastPlainTextLine(lineIndex, oldLine))
+            return false;
+
+        Rectangle oldLineBounds = Rectangle.Empty;
+        if (_layout.GetPreparedLine(lineIndex) is { } oldLayoutLine)
+            oldLineBounds = oldLayoutLine.Bounds;
+
+        _ = TryGetCaretContentRectangle(beforeCaret, out Rectangle oldCaretBounds);
+        Point scrollBefore = AutoScrollPosition;
+
+        bool changed = _state.InsertText(_doc, text);
+        if (!changed)
+            return false;
+
+        string newLine = _doc.GetLine(lineIndex);
+        var undo = new UndoRecord(
+            lineIndex,
+            [oldLine],
+            [newLine],
+            beforeCaret,
+            beforeAnchor,
+            _state.Caret,
+            _state.Anchor);
+
+        if (_state.Caret.Line != lineIndex ||
+            _doc.LineCount <= lineIndex ||
+            ContainsFastPathUnsafeMarkdown(newLine) ||
+            !_layout.TryFastUpdateSimpleTextLine(lineIndex, newLine))
+        {
+            FinalizeFastEditFallback(undo, allowMerge: true);
+            return true;
+        }
+
+        Rectangle newLineBounds = oldLineBounds;
+        if (_layout.GetPreparedLine(lineIndex) is { } newLayoutLine)
+            newLineBounds = newLayoutLine.Bounds;
+
+        _ = TryGetCaretContentRectangle(_state.Caret, out Rectangle newCaretBounds);
+
+        FinalizeFastEdit(
+            undo,
+            allowMerge: true,
+            scrollBefore,
+            structureChanged: false,
+            invalidateWholeClient: false,
+            oldLineBounds,
+            newLineBounds,
+            oldCaretBounds,
+            newCaretBounds);
+
+        return true;
+    }
+
+    private bool TryApplyFastSingleLineBackspace()
+    {
+        if (_state.HasSelection)
+            return false;
+
+        MarkdownPosition beforeCaret = _state.Caret;
+        if (beforeCaret.Column > 0)
+            return TryApplyFastSingleLinePlainEdit(() => _state.Backspace(_doc));
+
+        int currentLine = beforeCaret.Line;
+        if (currentLine <= 0 || !IsEntireDocumentFastPlainTextEligible())
+            return false;
+
+        string previousLine = _doc.GetLine(currentLine - 1);
+        string oldLine = _doc.GetLine(currentLine);
+        if (ContainsFastPathUnsafeMarkdown(previousLine) || ContainsFastPathUnsafeMarkdown(oldLine))
+            return false;
+
+        EndCellEdit(discard: false, move: CellMove.None);
+
+        MarkdownPosition? beforeAnchor = _state.Anchor;
+        Rectangle upperBounds = Rectangle.Empty;
+        Rectangle lowerBounds = Rectangle.Empty;
+
+        if (_layout.GetPreparedLine(currentLine - 1) is { } previousLayoutLine)
+            upperBounds = previousLayoutLine.Bounds;
+
+        if (_layout.GetPreparedLine(currentLine) is { } currentLayoutLine)
+            lowerBounds = currentLayoutLine.Bounds;
+
+        _ = TryGetCaretContentRectangle(beforeCaret, out Rectangle oldCaretBounds);
+        Point scrollBefore = AutoScrollPosition;
+
+        if (!_state.Backspace(_doc))
+            return false;
+
+        string mergedLine = _doc.GetLine(currentLine - 1);
+        var undo = new UndoRecord(
+            currentLine - 1,
+            [previousLine, oldLine],
+            [mergedLine],
+            beforeCaret,
+            beforeAnchor,
+            _state.Caret,
+            _state.Anchor);
+
+        if (ContainsFastPathUnsafeMarkdown(mergedLine) ||
+            !_layout.TryFastMergeSimpleTextLines(currentLine - 1, mergedLine))
+        {
+            FinalizeFastEditFallback(undo, allowMerge: false);
+            return true;
+        }
+
+        Rectangle mergedBounds = upperBounds;
+        if (_layout.GetPreparedLine(currentLine - 1) is { } mergedLayoutLine)
+            mergedBounds = mergedLayoutLine.Bounds;
+
+        _ = TryGetCaretContentRectangle(_state.Caret, out Rectangle newCaretBounds);
+
+        FinalizeFastEdit(
+            undo,
+            allowMerge: false,
+            scrollBefore,
+            structureChanged: true,
+            invalidateWholeClient: true,
+            upperBounds,
+            lowerBounds,
+            mergedBounds,
+            oldCaretBounds,
+            newCaretBounds);
+
+        return true;
+    }
+
+    private bool TryApplyFastSingleLineDelete()
+    {
+        if (_state.HasSelection)
+            return false;
+
+        MarkdownPosition beforeCaret = _state.Caret;
+        int lineLength = _doc.GetLineLength(beforeCaret.Line);
+        if (beforeCaret.Column < lineLength)
+            return TryApplyFastSingleLinePlainEdit(() => _state.Delete(_doc));
+
+        return false;
+    }
+
+    private bool TryApplyFastPlainTextEnter()
+    {
+        if (_state.HasSelection || !IsEntireDocumentFastPlainTextEligible())
+            return false;
+
+        EndCellEdit(discard: false, move: CellMove.None);
+
+        MarkdownPosition beforeCaret = _state.Caret;
+        MarkdownPosition? beforeAnchor = _state.Anchor;
+        int lineIndex = beforeCaret.Line;
+        if (lineIndex < 0 || lineIndex >= _doc.LineCount)
+            return false;
+
+        string oldLine = _doc.GetLine(lineIndex);
+        if (ContainsFastPathUnsafeMarkdown(oldLine))
+            return false;
+
+        string left = oldLine[..beforeCaret.Column];
+        string right = oldLine[beforeCaret.Column..];
+
+        Rectangle oldLineBounds = Rectangle.Empty;
+        if (_layout.GetPreparedLine(lineIndex) is { } oldLayoutLine)
+            oldLineBounds = oldLayoutLine.Bounds;
+
+        _ = TryGetCaretContentRectangle(beforeCaret, out Rectangle oldCaretBounds);
+        Point scrollBefore = AutoScrollPosition;
+
+        if (!_state.NewLine(_doc))
+            return false;
+
+        var undo = new UndoRecord(
+            lineIndex,
+            [oldLine],
+            [left, right],
+            beforeCaret,
+            beforeAnchor,
+            _state.Caret,
+            _state.Anchor);
+
+        if (ContainsFastPathUnsafeMarkdown(left) ||
+            ContainsFastPathUnsafeMarkdown(right) ||
+            !_layout.TryFastSplitSimpleTextLine(lineIndex, left, right))
+        {
+            FinalizeFastEditFallback(undo, allowMerge: false);
+            return true;
+        }
+
+        Rectangle firstBounds = oldLineBounds;
+        Rectangle secondBounds = Rectangle.Empty;
+        if (_layout.GetPreparedLine(lineIndex) is { } firstLayoutLine)
+            firstBounds = firstLayoutLine.Bounds;
+
+        if (_layout.GetPreparedLine(lineIndex + 1) is { } secondLayoutLine)
+            secondBounds = secondLayoutLine.Bounds;
+
+        _ = TryGetCaretContentRectangle(_state.Caret, out Rectangle newCaretBounds);
+
+        FinalizeFastEdit(
+            undo,
+            allowMerge: false,
+            scrollBefore,
+            structureChanged: true,
+            invalidateWholeClient: true,
+            oldLineBounds,
+            firstBounds,
+            secondBounds,
+            oldCaretBounds,
+            newCaretBounds);
+
+        return true;
+    }
+
+    private bool TryApplyFastSingleLinePlainEdit(Func<bool> editOperation)
+    {
+        EndCellEdit(discard: false, move: CellMove.None);
+
+        MarkdownPosition beforeCaret = _state.Caret;
+        MarkdownPosition? beforeAnchor = _state.Anchor;
+        int lineIndex = beforeCaret.Line;
+        if (lineIndex < 0 || lineIndex >= _doc.LineCount)
+            return false;
+
+        string oldLine = _doc.GetLine(lineIndex);
+        if (!CanUseFastPlainTextLine(lineIndex, oldLine))
+            return false;
+
+        Rectangle oldLineBounds = Rectangle.Empty;
+        if (_layout.GetPreparedLine(lineIndex) is { } oldLayoutLine)
+            oldLineBounds = oldLayoutLine.Bounds;
+
+        _ = TryGetCaretContentRectangle(beforeCaret, out Rectangle oldCaretBounds);
+        Point scrollBefore = AutoScrollPosition;
+
+        if (!editOperation())
+            return false;
+
+        string newLine = _doc.GetLine(lineIndex);
+        var undo = new UndoRecord(
+            lineIndex,
+            [oldLine],
+            [newLine],
+            beforeCaret,
+            beforeAnchor,
+            _state.Caret,
+            _state.Anchor);
+
+        if (_state.Caret.Line != lineIndex ||
+            _doc.LineCount <= lineIndex ||
+            ContainsFastPathUnsafeMarkdown(newLine) ||
+            !_layout.TryFastUpdateSimpleTextLine(lineIndex, newLine))
+        {
+            FinalizeFastEditFallback(undo, allowMerge: true);
+            return true;
+        }
+
+        Rectangle newLineBounds = oldLineBounds;
+        if (_layout.GetPreparedLine(lineIndex) is { } newLayoutLine)
+            newLineBounds = newLayoutLine.Bounds;
+
+        _ = TryGetCaretContentRectangle(_state.Caret, out Rectangle newCaretBounds);
+
+        FinalizeFastEdit(
+            undo,
+            allowMerge: true,
+            scrollBefore,
+            structureChanged: false,
+            invalidateWholeClient: false,
+            oldLineBounds,
+            newLineBounds,
+            oldCaretBounds,
+            newCaretBounds);
+
+        return true;
+    }
+
+    private void FinalizeFastEdit(
+        UndoRecord undo,
+        bool allowMerge,
+        Point scrollBefore,
+        bool structureChanged,
+        bool invalidateWholeClient,
+        params Rectangle[] dirtyContentRegions)
+    {
+        if (allowMerge)
+            PushOrMergeFastSingleLineUndo(undo);
+        else
+            PushUndo(undo);
+
+        _redo.Clear();
+
+        CleanupRawTableModes();
+        ExitRawModesIfCaretOutside();
+        InvalidateLayoutContext();
+
+        UpdateAutoScrollMinSizeAfterFastEdit(structureChanged);
+
+        ResetCaretBlink();
+        EnsureCaretVisible();
+
+        if (AutoScrollPosition != scrollBefore)
+        {
+            Invalidate(new Rectangle(Point.Empty, ClientSize), invalidateChildren: false);
+        }
+        else if (invalidateWholeClient)
+        {
+            InvalidateClientFromDirtyContentTop(dirtyContentRegions);
+        }
+        else
+        {
+            InvalidateFastContentRegions(dirtyContentRegions);
+        }
+
+        MarkdownChanged?.Invoke(this, new MarkdownChangedEventArgs(_doc.ToMarkdown));
+    }
+
+    private void UpdateAutoScrollMinSizeAfterFastEdit(bool structureChanged)
+    {
+        Size current = AutoScrollMinSize;
+        Size desired = _layout.ContentSize;
+
+        if (structureChanged)
+        {
+            if (current != desired)
+                AutoScrollMinSize = desired;
+
+            return;
+        }
+
+        int targetWidth = current.Width;
+        int targetHeight = current.Height;
+
+        int desiredWidth = Math.Max(ClientSize.Width, desired.Width);
+        int desiredHeight = Math.Max(ClientSize.Height, desired.Height);
+
+        if (desiredWidth > current.Width)
+            targetWidth = RoundUpToStep(desiredWidth, 128);
+
+        if (desiredHeight > current.Height)
+            targetHeight = RoundUpToStep(desiredHeight, 64);
+
+        if (targetWidth != current.Width || targetHeight != current.Height)
+            AutoScrollMinSize = new Size(targetWidth, targetHeight);
+    }
+
+    private void InvalidateClientFromDirtyContentTop(params Rectangle[] dirtyContentRegions)
+    {
+        int top = int.MaxValue;
+
+        foreach (Rectangle region in dirtyContentRegions)
+        {
+            if (region.IsEmpty)
+                continue;
+
+            top = Math.Min(top, region.Top);
+        }
+
+        if (top == int.MaxValue)
+        {
+            Invalidate(new Rectangle(Point.Empty, ClientSize), invalidateChildren: false);
+            return;
+        }
+
+        int clientTop = Math.Max(0, top + AutoScrollPosition.Y - 4);
+        if (clientTop >= ClientSize.Height)
+            return;
+
+        Invalidate(new Rectangle(0, clientTop, ClientSize.Width, ClientSize.Height - clientTop), invalidateChildren: false);
+    }
+
+    private static int RoundUpToStep(int value, int step)
+    {
+        if (step <= 1)
+            return Math.Max(1, value);
+
+        int adjusted = Math.Max(1, value);
+        return ((adjusted + step - 1) / step) * step;
+    }
+
+    private void FinalizeFastEditFallback(UndoRecord undo, bool allowMerge)
+    {
+        _doc.ReparseDirtyBlocks();
+        EnsureTrailingEditableLineAfterTerminalTable();
+
+        if (allowMerge)
+            PushOrMergeFastSingleLineUndo(undo);
+        else
+            PushUndo(undo);
+
+        _redo.Clear();
+
+        CleanupRawTableModes();
+        ExitRawModesIfCaretOutside();
+        RefreshLayoutAfterDocumentChange();
+
+        ResetCaretBlink();
+        EnsureCaretVisible();
+        Invalidate(new Rectangle(Point.Empty, ClientSize), invalidateChildren: false);
+
+        MarkdownChanged?.Invoke(this, new MarkdownChangedEventArgs(_doc.ToMarkdown));
+    }
+
+    private void PushOrMergeFastSingleLineUndo(UndoRecord next)
+    {
+        if (_undo.Count > 0 &&
+            TryMergeFastSingleLineUndo(_undo[^1], next, out UndoRecord merged))
+        {
+            _undo[^1] = merged;
+            return;
+        }
+
+        PushUndo(next);
+    }
+
+    private static bool TryMergeFastSingleLineUndo(UndoRecord previous, UndoRecord next, out UndoRecord merged)
+    {
+        merged = default;
+
+        if (previous.StartLine != next.StartLine ||
+            previous.OldLines.Length != 1 ||
+            previous.NewLines.Length != 1 ||
+            next.OldLines.Length != 1 ||
+            next.NewLines.Length != 1)
+        {
+            return false;
+        }
+
+        if (previous.BeforeAnchor.HasValue ||
+            previous.AfterAnchor.HasValue ||
+            next.BeforeAnchor.HasValue ||
+            next.AfterAnchor.HasValue)
+        {
+            return false;
+        }
+
+        if (previous.AfterCaret != next.BeforeCaret)
+            return false;
+
+        if (!string.Equals(previous.NewLines[0], next.OldLines[0], StringComparison.Ordinal))
+            return false;
+
+        merged = new UndoRecord(
+            previous.StartLine,
+            previous.OldLines,
+            next.NewLines,
+            previous.BeforeCaret,
+            previous.BeforeAnchor,
+            next.AfterCaret,
+            next.AfterAnchor);
+
+        return true;
+    }
+
+    private bool CanUseFastPlainTextLine(int lineIndex, string sourceText)
+    {
+        LayoutLine? line = _layout.GetPreparedLine(lineIndex);
+        return line is not null &&
+               line.Kind is MarkdownBlockKind.Paragraph or MarkdownBlockKind.Blank &&
+               !line.IsImagePreview &&
+               !ContainsFastPathUnsafeMarkdown(sourceText);
+    }
+
+    private bool IsEntireDocumentFastPlainTextEligible()
+    {
+        foreach (MarkdownBlock block in _doc.Blocks)
+        {
+            if (block.Kind is not (MarkdownBlockKind.Paragraph or MarkdownBlockKind.Blank))
+                return false;
+        }
+
+        for (int i = 0; i < _doc.LineCount; i++)
+        {
+            if (ContainsFastPathUnsafeMarkdown(_doc.GetLine(i)))
+                return false;
+        }
+
+        return true;
+    }
+
+    private void InvalidateFastContentRegions(params Rectangle[] dirtyContentRegions)
+    {
+        Rectangle dirty = Rectangle.Empty;
+        bool hasDirty = false;
+
+        foreach (Rectangle region in dirtyContentRegions)
+        {
+            if (region.IsEmpty)
+                continue;
+
+            dirty = hasDirty ? Rectangle.Union(dirty, region) : region;
+            hasDirty = true;
+        }
+
+        if (!hasDirty)
+        {
+            Invalidate(new Rectangle(Point.Empty, ClientSize), invalidateChildren: false);
+            return;
+        }
+
+        dirty = Rectangle.Inflate(dirty, 12, 4);
+        InvalidateContentRectangle(dirty);
+    }
+
+    private static bool ContainsFastPathUnsafeMarkdown(string text)
+    {
+        foreach (char ch in text)
+        {
+            if (ch is '\\' or '`' or '*' or '_' or '~' or '[' or ']' or '!' or '<' or '>' or '#' or '|' or ':' or '-')
+                return true;
+        }
+
+        return false;
     }
 
     private bool TryGetAffectedLineRange(out int startLine, out int endLine)
@@ -4141,7 +4787,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         EnsureCaretVisible();
         Invalidate();
 
-        MarkdownChanged?.Invoke(this, new MarkdownChangedEventArgs(_doc.ToMarkdown()));
+        MarkdownChanged?.Invoke(this, new MarkdownChangedEventArgs(_doc.ToMarkdown));
     }
 
     private UndoRecord BuildUndoRecord(
@@ -4261,7 +4907,8 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
             _rawTableStartLines,
             rawCodeFenceStarts,
             rawSourceLines,
-            rawInlineLines);
+            rawInlineLines,
+            controlHandle: Handle);
 
         AutoScrollMinSize = _layout.ContentSize;
         UpdateLayoutContext(rawCodeFenceStarts, rawSourceLines, rawInlineLines);
@@ -4600,7 +5247,13 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
             return;
         }
 
-        int x = contentTextStart.X;
+        if (TryDrawSimplePlainLine(g, line, contentTextStart, display, baseFont))
+            return;
+
+        // Use LayoutEngine's cached offsets so text positions match cursor/selection exactly.
+        float[] offsets = _layout.GetVisualOffsets(line);
+        int visCol = 0;
+        float baseX = contentTextStart.X;
         var cache = new Dictionary<int, Font>();
 
         using var codeBrush = new SolidBrush(_inlineCodeBg);
@@ -4610,12 +5263,14 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         {
             foreach (var run in line.InlineRuns)
             {
+                float runX = SnapVisualX(baseX + OffsetAt(offsets, visCol));
+
                 if (run.IsImage)
                 {
                     Size imageSize = GetInlineImageSize(run.Source);
                     int imageY = line.Bounds.Top + Math.Max(0, (line.Bounds.Height - imageSize.Height) / 2);
-                    DrawInlineImage(g, run, new Rectangle(x, imageY, imageSize.Width, imageSize.Height));
-                    x += imageSize.Width;
+                    DrawInlineImage(g, run, new Rectangle((int)Math.Round(runX), imageY, imageSize.Width, imageSize.Height));
+                    visCol += Math.Max(1, run.VisualLength);
                     continue;
                 }
 
@@ -4623,47 +5278,57 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
 
                 bool isCode = (run.Style & InlineStyle.Code) != 0;
                 Font runFont = GetOrCreateInlineFont(cache, baseFont, run.Style, isCode, run.IsFootnoteReference, _monoFont);
+                int visColEnd = visCol + run.Text.Length;
 
                 if (run.IsFootnoteReference)
                 {
                     int runTextY = line.Bounds.Top + Math.Max(0, (line.Bounds.Height - MeasureHeight(g, runFont)) / 2);
-                    DrawFootnoteReferenceText(g, run.Text, runFont, new Point(x, runTextY));
-                    x += MeasureWidth(g, run.Text, runFont);
+                    DrawTextGdiPlus(g, run.Text, runFont, runX, runTextY - FootnoteRaiseY, _linkColor);
+                    visCol = visColEnd;
                     continue;
                 }
 
                 if (run.IsLink)
                 {
                     int runTextY = line.Bounds.Top + Math.Max(0, (line.Bounds.Height - MeasureHeight(g, runFont)) / 2);
-                    DrawLinkText(g, run.Text, runFont, new Point(x, runTextY));
-                    x += MeasureWidth(g, run.Text, runFont);
+                    DrawTextGdiPlus(g, run.Text, runFont, runX, runTextY, _linkColor);
+
+                    float runEndX = SnapVisualX(baseX + OffsetAt(offsets, visColEnd));
+                    float linkWidth = Math.Max(1f, runEndX - runX);
+                    int height = MeasureHeight(g, runFont);
+                    float underlineY = runTextY + Math.Max(1, height - 1);
+                    using var linkPen = new Pen(_linkColor, 1f);
+                    g.DrawLine(linkPen, runX, underlineY, runX + linkWidth, underlineY);
+
+                    visCol = visColEnd;
                     continue;
                 }
 
                 if (!isCode)
                 {
                     int runTextY = line.Bounds.Top + Math.Max(0, (line.Bounds.Height - MeasureHeight(g, runFont)) / 2);
-                    DrawTextGdiPlus(g, run.Text, runFont, new Point(x, runTextY), ForeColor);
-                    x += MeasureWidth(g, run.Text, runFont);
+                    DrawTextGdiPlus(g, run.Text, runFont, runX, runTextY, ForeColor);
+                    visCol = visColEnd;
                     continue;
                 }
 
-                int textW = MeasureWidth(g, run.Text, runFont);
+                // Code chip: offsets already include left/right padding
+                float chipEndX = SnapVisualX(baseX + OffsetAt(offsets, visColEnd));
+                int chipXi = (int)Math.Round(runX);
+                int chipWi = Math.Max(1, (int)Math.Round(chipEndX - runX));
                 int textH = MeasureHeight(g, runFont);
-
-                int chipW = textW + InlineCodePadX * 2;
                 int chipH = Math.Max(1, textH + InlineCodePadY * 2);
                 int chipY = contentTextStart.Y + Math.Max(0, (line.Bounds.Height - chipH) / 2);
 
-                var chip = new Rectangle(x, chipY, chipW, chipH);
+                var chip = new Rectangle(chipXi, chipY, chipWi, chipH);
 
                 g.FillRectangle(codeBrush, chip);
                 g.DrawRectangle(codePen, chip.X, chip.Y, Math.Max(1, chip.Width - 1), Math.Max(1, chip.Height - 1));
 
                 int textY = chip.Y + Math.Max(0, (chip.Height - textH) / 2);
-                DrawTextGdiPlus(g, run.Text, runFont, new Point(x + InlineCodePadX, textY), ForeColor);
+                DrawTextGdiPlus(g, run.Text, runFont, runX + InlineCodePadX, textY, ForeColor);
 
-                x += chipW;
+                visCol = visColEnd;
             }
         }
         finally
@@ -4672,6 +5337,31 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
                 f.Dispose();
         }
     }
+
+    private bool TryDrawSimplePlainLine(Graphics g, LayoutLine line, Point contentTextStart, string display, Font baseFont)
+    {
+        if (line.InlineRuns.Count != 1)
+            return false;
+
+        InlineRun run = line.InlineRuns[0];
+        if (run.IsImage || run.IsLink || run.IsFootnoteReference || run.Style != InlineStyle.None)
+            return false;
+
+        if (!string.Equals(run.Text, display, StringComparison.Ordinal))
+            return false;
+
+        TextRenderer.DrawText(
+            g,
+            display,
+            baseFont,
+            contentTextStart,
+            ForeColor,
+            PlainTextDrawFlags);
+        return true;
+    }
+
+    private static float OffsetAt(float[] offsets, int col)
+        => col >= 0 && col < offsets.Length ? offsets[col] : (offsets.Length > 0 ? offsets[^1] : 0f);
 
     private static float SnapVisualX(float x)
         => (float)Math.Round(x, MidpointRounding.AwayFromZero);
@@ -4687,135 +5377,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
     }
 
     private float MeasureVisualPrefix(Graphics g, LayoutLine line, int visualCols)
-    {
-        float[] offsets = BuildRenderVisualOffsets(g, line);
-        if (offsets.Length == 0)
-            return 0;
-
-        visualCols = Math.Clamp(visualCols, 0, offsets.Length - 1);
-        return offsets[visualCols];
-    }
-
-    private float[] BuildRenderVisualOffsets(Graphics g, LayoutLine line)
-    {
-        string display = line.Projection.DisplayText;
-        if (string.IsNullOrEmpty(display))
-            return Array.Empty<float>();
-
-        IReadOnlyList<InlineRun> runs = line.InlineRuns;
-        Font baseFont = GetRenderFont(line);
-
-        if (runs.Count == 0)
-            return MeasurePrefixAdvances(g, display, baseFont);
-
-        var offsets = new float[display.Length + 1];
-        int col = 0;
-        float width = 0f;
-        var cache = new Dictionary<int, Font>();
-
-        try
-        {
-            foreach (InlineRun run in runs)
-            {
-                if (run.IsImage)
-                {
-                    col += Math.Max(1, run.VisualLength);
-                    offsets[col] = width + GetInlineImageSize(run.Source).Width;
-                    width = offsets[col];
-                    continue;
-                }
-
-                if (string.IsNullOrEmpty(run.Text))
-                    continue;
-
-                bool isCode = (run.Style & InlineStyle.Code) != 0;
-                Font runFont = GetOrCreateInlineFont(cache, baseFont, run.Style, isCode, run.IsFootnoteReference, _monoFont);
-
-                if (isCode)
-                    width += InlineCodePadX;
-
-                float[] runOffsets = MeasurePrefixAdvances(g, run.Text, runFont);
-                for (int i = 1; i < runOffsets.Length; i++)
-                {
-                    col++;
-                    offsets[col] = width + runOffsets[i];
-                }
-
-                if (isCode)
-                    offsets[col] += InlineCodePadX;
-
-                width = offsets[col];
-            }
-        }
-        finally
-        {
-            foreach (Font font in cache.Values)
-                font.Dispose();
-        }
-
-        offsets[^1] = Math.Max(offsets[^1], MeasureRenderedLineWidth(g, display, runs, baseFont));
-        return offsets;
-    }
-
-    private float MeasureRenderedLineWidth(Graphics g, string display, IReadOnlyList<InlineRun> runs, Font baseFont)
-    {
-        if (string.IsNullOrEmpty(display))
-            return 0;
-
-        if (runs.Count == 0)
-        {
-            return Math.Max(
-                MeasureAdvanceWidth(g, display, baseFont),
-                MeasureInkWidth(g, display, baseFont));
-        }
-
-        float width = 0f;
-        var cache = new Dictionary<int, Font>();
-
-        try
-        {
-            for (int i = 0; i < runs.Count; i++)
-            {
-                InlineRun run = runs[i];
-
-                if (run.IsImage)
-                {
-                    width += GetInlineImageSize(run.Source).Width;
-                    continue;
-                }
-
-                if (string.IsNullOrEmpty(run.Text))
-                    continue;
-
-                bool isCode = (run.Style & InlineStyle.Code) != 0;
-                Font runFont = GetOrCreateInlineFont(cache, baseFont, run.Style, isCode, run.IsFootnoteReference, _monoFont);
-
-                float advanceWidth = MeasureAdvanceWidth(g, run.Text, runFont);
-                if (isCode)
-                {
-                    width += advanceWidth + InlineCodePadX * 2;
-                    continue;
-                }
-
-                if (i == runs.Count - 1)
-                {
-                    float inkWidth = MeasureInkWidth(g, run.Text, runFont);
-                    width += Math.Max(advanceWidth, inkWidth);
-                }
-                else
-                {
-                    width += advanceWidth;
-                }
-            }
-        }
-        finally
-        {
-            foreach (Font font in cache.Values)
-                font.Dispose();
-        }
-
-        return width;
-    }
+        => MeasureVisualPrefix(line, visualCols);
 
     private void ResetCaretBlink()
     {
@@ -5046,7 +5608,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
             RefreshLayoutAfterDocumentChange();
             Invalidate();
 
-            MarkdownChanged?.Invoke(this, new MarkdownChangedEventArgs(_doc.ToMarkdown()));
+            MarkdownChanged?.Invoke(this, new MarkdownChangedEventArgs(_doc.ToMarkdown));
 
             int reopenRow = targetRow;
             int reopenCol = targetCol;

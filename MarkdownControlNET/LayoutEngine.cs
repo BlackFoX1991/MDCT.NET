@@ -4,6 +4,7 @@ using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Text;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Windows.Forms;
 
 namespace MarkdownGdi;
@@ -17,8 +18,8 @@ public enum LineFontRole
 
 public sealed class LayoutLine
 {
-    public required int SourceLine { get; init; }
-    public required string SourceText { get; init; }
+    public required int SourceLine { get; set; }
+    public required string SourceText { get; set; }
     public required VisualProjection Projection { get; set; }
     public required float[] VisualOffsets { get; set; }
     public required Rectangle Bounds { get; set; }
@@ -168,6 +169,7 @@ public sealed class LayoutEngine
     private IReadOnlyDictionary<string, int> _footnoteDisplayNumbers = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
     private float _measurementDpiX = 96f;
     private float _measurementDpiY = 96f;
+    private IntPtr _controlHandle;
 
     private int _sourceLineCount;
     private int _maxContentWidth;
@@ -183,6 +185,22 @@ public sealed class LayoutEngine
         Alignment = StringAlignment.Near,
         LineAlignment = StringAlignment.Near
     };
+
+    /// <summary>
+    /// Creates a screen-compatible Graphics for text measurement.
+    /// Using a screen DC (instead of a memory-bitmap DC) ensures that
+    /// MeasureCharacterRanges produces offsets consistent with DrawString
+    /// on the paint Graphics — especially with ClearType grid-fitting.
+    /// </summary>
+    private Graphics CreateMeasurementGraphics()
+    {
+        // FromHwnd(IntPtr.Zero) = screen DC; FromHwnd(handle) = window DC.
+        // Both are display-compatible and match the paint Graphics.
+        var g = Graphics.FromHwnd(_controlHandle);
+        g.PageUnit = GraphicsUnit.Pixel;
+        g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
+        return g;
+    }
 
     private readonly record struct CodeFenceSpan(
         int StartLine,
@@ -203,6 +221,33 @@ public sealed class LayoutEngine
     private const int ImagePreviewPlaceholderWidth = 320;
     private const int ImagePreviewPlaceholderHeight = 180;
     private const int ImagePreviewPaddingY = 8;
+    private const TextFormatFlags PlainTextMeasureFlags =
+        TextFormatFlags.NoPadding |
+        TextFormatFlags.NoPrefix |
+        TextFormatFlags.SingleLine;
+
+    [DllImport("gdi32.dll", CharSet = CharSet.Unicode, SetLastError = true, ExactSpelling = true)]
+    private static extern bool GetTextExtentExPointW(
+        IntPtr hdc,
+        string lpString,
+        int cchString,
+        int nMaxExtent,
+        out int lpnFit,
+        [Out] int[] alpDx,
+        out NativeSize lpSize);
+
+    [DllImport("gdi32.dll", SetLastError = true)]
+    private static extern IntPtr SelectObject(IntPtr hdc, IntPtr hgdiobj);
+
+    [DllImport("gdi32.dll", SetLastError = true)]
+    private static extern bool DeleteObject(IntPtr hObject);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeSize
+    {
+        public int cx;
+        public int cy;
+    }
 
     private int MeasureInlineRunsWidthForTableLayout(IReadOnlyList<InlineRun> runs, Font baseFont, Graphics graphics)
     {
@@ -531,7 +576,8 @@ public sealed class LayoutEngine
         IReadOnlySet<int>? forceRawTableStarts = null,
         IReadOnlySet<int>? forceRawCodeFenceStarts = null,
         IReadOnlySet<int>? forceRawLines = null,
-        IReadOnlySet<int>? forceRawInlineLines = null)
+        IReadOnlySet<int>? forceRawInlineLines = null,
+        IntPtr controlHandle = default)
     {
         _sourceLineCount = doc.LineCount;
         _currentDoc = doc;
@@ -543,6 +589,7 @@ public sealed class LayoutEngine
         _imageSizeProvider = imageSizeProvider;
         _measurementDpiX = Math.Max(1f, dpiX);
         _measurementDpiY = Math.Max(1f, dpiY);
+        _controlHandle = controlHandle;
         _footnoteIndex = MarkdownFootnoteHelper.BuildIndex(doc.Lines);
         _footnoteDisplayNumbers = BuildFootnoteDisplayNumbers(doc, _footnoteIndex);
 
@@ -572,11 +619,10 @@ public sealed class LayoutEngine
             return;
         }
 
-        using var measurementBitmap = new Bitmap(1, 1);
-        measurementBitmap.SetResolution(Math.Max(1f, dpiX), Math.Max(1f, dpiY));
-        using var measurementGraphics = Graphics.FromImage(measurementBitmap);
-        measurementGraphics.PageUnit = GraphicsUnit.Pixel;
-        measurementGraphics.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
+        using var measurementGraphics = CreateMeasurementGraphics();
+
+        // Pre-compute average character width for fast off-screen width estimation.
+        float avgCharWidth = MeasureAverageCharWidth(measurementGraphics, baseFont);
 
         var semantics = BuildSemantics(doc);
         _semantics = semantics;
@@ -613,7 +659,8 @@ public sealed class LayoutEngine
         }
 
         _fenceSpans = BuildCodeFenceSpans(doc);
-        int[] fenceSpanByLine = Enumerable.Repeat(-1, doc.LineCount).ToArray();
+        int[] fenceSpanByLine = new int[doc.LineCount];
+        Array.Fill(fenceSpanByLine, -1);
         _fenceSpanByLine = fenceSpanByLine;
 
         // Neutralize parser code fence (custom span logic is authoritative)
@@ -934,7 +981,7 @@ public sealed class LayoutEngine
                 int textWidth;
                 bool eagerVisualOffsets = ShouldMeasureVisualOffsetsEagerly(lineIdx, y, viewport, preferredSourceLine);
                 float[] visualOffsets = eagerVisualOffsets
-                    ? BuildVisualOffsets(proj.DisplayText, runs, measureFont, measurementGraphics)
+                    ? BuildVisualOffsets(proj.DisplayText, runs, measureFont, measurementGraphics, preferExactPlainTextMeasurement: sem.Kind == MarkdownBlockKind.Heading)
                     : Array.Empty<float>();
 
                 if (isImagePreview)
@@ -954,14 +1001,24 @@ public sealed class LayoutEngine
                     else if (isHorizontalRule && !forceRawThisLine)
                         lineHeight = Math.Max(lineHeight, 14);
 
-                    textWidth = (isHorizontalRule && !forceRawThisLine)
-                        ? Math.Max(1, viewport.Width - left - 12)
-                        : Math.Max(
-                            1,
-                            (int)Math.Ceiling(
-                                eagerVisualOffsets
-                                    ? GetVisualWidth(visualOffsets)
-                                    : MeasureRenderedLineWidth(proj.DisplayText, runs, measureFont, measurementGraphics)));
+                    if (isHorizontalRule && !forceRawThisLine)
+                    {
+                        textWidth = Math.Max(1, viewport.Width - left - 12);
+                    }
+                    else if (eagerVisualOffsets)
+                    {
+                        textWidth = Math.Max(1, (int)Math.Ceiling(GetVisualWidth(visualOffsets)));
+                    }
+                    else if (eagerLineRealization)
+                    {
+                        textWidth = Math.Max(1, (int)Math.Ceiling(
+                            MeasureRenderedLineWidth(proj.DisplayText, runs, measureFont, measurementGraphics)));
+                    }
+                    else
+                    {
+                        // Fast estimate for off-screen lines; corrected on realization.
+                        textWidth = Math.Max(1, EstimateTextWidth(proj.DisplayText, avgCharWidth));
+                    }
                 }
 
                 var line = new LayoutLine
@@ -1062,6 +1119,122 @@ public sealed class LayoutEngine
 
         EnsureLineRealized(line);
         return line;
+    }
+
+    public bool TryFastUpdateSimpleTextLine(int sourceLine, string sourceText)
+    {
+        if (!_lineBySource.TryGetValue(sourceLine, out LayoutLine? line))
+            return false;
+
+        if (line.IsImagePreview || IsHorizontalRuleKind(line.Kind))
+            return false;
+
+        if (line.Kind is not (MarkdownBlockKind.Paragraph or MarkdownBlockKind.Blank))
+            return false;
+
+        using var measurementGraphics = CreateMeasurementGraphics();
+        Font measureFont = ResolveLineMeasureFont(line.Kind, line.HeadingLevel, line.FontRole, out bool disposeMeasureFont);
+        try
+        {
+            VisualProjection projection = CreateIdentityProjection(sourceText);
+            IReadOnlyList<InlineRun> runs = CreatePlainRuns(projection.DisplayText);
+            float[] visualOffsets = BuildVisualOffsets(projection.DisplayText, runs, measureFont, measurementGraphics, preferExactPlainTextMeasurement: false);
+            int lineHeight = MeasureInlineRunsContentHeight(runs, measureFont, measurementGraphics) + 4;
+            int textWidth = Math.Max(1, (int)Math.Ceiling(GetVisualWidth(visualOffsets)));
+
+            line.SourceText = sourceText;
+            ApplyRealizedLine(line, projection, runs, visualOffsets, textWidth, lineHeight);
+            line.IsRealized = true;
+            return true;
+        }
+        finally
+        {
+            if (disposeMeasureFont)
+                measureFont.Dispose();
+        }
+    }
+
+    public bool TryFastSplitSimpleTextLine(int sourceLine, string firstText, string secondText)
+    {
+        if (!CanFastMutateSimplePlainTextDocument() ||
+            !_lineIndexBySource.TryGetValue(sourceLine, out int lineIndex) ||
+            lineIndex < 0 ||
+            lineIndex >= _lines.Count)
+        {
+            return false;
+        }
+
+        LayoutLine oldLine = _lines[lineIndex];
+        if (oldLine.Kind is not (MarkdownBlockKind.Paragraph or MarkdownBlockKind.Blank))
+            return false;
+
+        using var measurementGraphics = CreateMeasurementGraphics();
+
+        LayoutLine firstLine = CreateRealizedSimpleTextLine(sourceLine, firstText, oldLine.Bounds.Top, measurementGraphics);
+        LayoutLine secondLine = CreateRealizedSimpleTextLine(sourceLine + 1, secondText, firstLine.Bounds.Bottom, measurementGraphics);
+
+        int deltaHeight = firstLine.Bounds.Height + secondLine.Bounds.Height - oldLine.Bounds.Height;
+
+        _lines[lineIndex] = firstLine;
+        _lines.Insert(lineIndex + 1, secondLine);
+
+        for (int i = lineIndex + 2; i < _lines.Count; i++)
+        {
+            LayoutLine line = _lines[i];
+            line.SourceLine++;
+
+            if (deltaHeight != 0)
+                line.Bounds = new Rectangle(line.Bounds.X, line.Bounds.Y + deltaHeight, line.Bounds.Width, line.Bounds.Height);
+        }
+
+        _sourceLineCount = _lines.Count;
+        RebuildSimplePlainTextSemantics();
+        RebuildLineIndexesAndMetrics();
+        return true;
+    }
+
+    public bool TryFastMergeSimpleTextLines(int firstSourceLine, string mergedText)
+    {
+        if (!CanFastMutateSimplePlainTextDocument() ||
+            !_lineIndexBySource.TryGetValue(firstSourceLine, out int firstIndex) ||
+            firstIndex < 0 ||
+            firstIndex >= _lines.Count - 1)
+        {
+            return false;
+        }
+
+        LayoutLine firstLine = _lines[firstIndex];
+        LayoutLine secondLine = _lines[firstIndex + 1];
+        if (firstLine.SourceLine != firstSourceLine || secondLine.SourceLine != firstSourceLine + 1)
+            return false;
+
+        if (firstLine.Kind is not (MarkdownBlockKind.Paragraph or MarkdownBlockKind.Blank) ||
+            secondLine.Kind is not (MarkdownBlockKind.Paragraph or MarkdownBlockKind.Blank))
+        {
+            return false;
+        }
+
+        using var measurementGraphics = CreateMeasurementGraphics();
+        LayoutLine mergedLine = CreateRealizedSimpleTextLine(firstSourceLine, mergedText, firstLine.Bounds.Top, measurementGraphics);
+
+        int deltaHeight = mergedLine.Bounds.Height - (firstLine.Bounds.Height + secondLine.Bounds.Height);
+
+        _lines[firstIndex] = mergedLine;
+        _lines.RemoveAt(firstIndex + 1);
+
+        for (int i = firstIndex + 1; i < _lines.Count; i++)
+        {
+            LayoutLine line = _lines[i];
+            line.SourceLine--;
+
+            if (deltaHeight != 0)
+                line.Bounds = new Rectangle(line.Bounds.X, line.Bounds.Y + deltaHeight, line.Bounds.Width, line.Bounds.Height);
+        }
+
+        _sourceLineCount = _lines.Count;
+        RebuildSimplePlainTextSemantics();
+        RebuildLineIndexesAndMetrics();
+        return true;
     }
 
     public float[] GetVisualOffsets(LayoutLine line) => EnsureVisualOffsets(line);
@@ -1870,11 +2043,7 @@ public sealed class LayoutEngine
         if (line.IsRealized || _currentDoc is null)
             return;
 
-        using var measurementBitmap = new Bitmap(1, 1);
-        measurementBitmap.SetResolution(_measurementDpiX, _measurementDpiY);
-        using var measurementGraphics = Graphics.FromImage(measurementBitmap);
-        measurementGraphics.PageUnit = GraphicsUnit.Pixel;
-        measurementGraphics.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
+        using var measurementGraphics = CreateMeasurementGraphics();
 
         LineSemantic sem = _semantics[line.SourceLine];
         string source = line.SourceText;
@@ -1900,7 +2069,7 @@ public sealed class LayoutEngine
                 out string imageAltText,
                 out string imageSource);
 
-            float[] visualOffsets = BuildVisualOffsets(projection.DisplayText, runs, measureFont, measurementGraphics);
+            float[] visualOffsets = BuildVisualOffsets(projection.DisplayText, runs, measureFont, measurementGraphics, preferExactPlainTextMeasurement: line.Kind == MarkdownBlockKind.Heading);
             int lineHeight;
             int textWidth;
 
@@ -1979,6 +2148,136 @@ public sealed class LayoutEngine
         ContentSize = new Size(Math.Max(_lastViewport.Width, _maxContentWidth), contentHeight);
     }
 
+    private bool CanFastMutateSimplePlainTextDocument()
+    {
+        if (_tables.Count != 0 ||
+            _tableByStartLine.Count != 0 ||
+            _tableSourceLines.Count != 0 ||
+            _listItemByLine.Count != 0 ||
+            _imageByLine.Count != 0 ||
+            _footnoteLineBySource.Count != 0 ||
+            _footnoteBlockBySourceLine.Count != 0 ||
+            _fenceSpans.Count != 0 ||
+            _forceRawCodeFenceStarts.Count != 0 ||
+            _forceRawLines.Count != 0 ||
+            _forceRawInlineLines.Count != 0)
+        {
+            return false;
+        }
+
+        if (_lines.Count != _sourceLineCount || _semantics.Length != _sourceLineCount)
+            return false;
+
+        foreach (LayoutLine line in _lines)
+        {
+            if (line.IsImagePreview ||
+                line.IsTaskListItem ||
+                line.IsAdmonitionMarkerLine ||
+                line.Kind is not (MarkdownBlockKind.Paragraph or MarkdownBlockKind.Blank))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private LayoutLine CreateRealizedSimpleTextLine(int sourceLine, string sourceText, int topY, Graphics measurementGraphics)
+    {
+        const int left = 8;
+        MarkdownBlockKind kind = string.IsNullOrWhiteSpace(sourceText)
+            ? MarkdownBlockKind.Blank
+            : MarkdownBlockKind.Paragraph;
+
+        Font measureFont = ResolveLineMeasureFont(kind, 0, LineFontRole.Base, out bool disposeMeasureFont);
+        try
+        {
+            VisualProjection projection = CreateIdentityProjection(sourceText);
+            IReadOnlyList<InlineRun> runs = CreatePlainRuns(projection.DisplayText);
+            float[] visualOffsets = BuildVisualOffsets(projection.DisplayText, runs, measureFont, measurementGraphics);
+            int lineHeight = MeasureInlineRunsContentHeight(runs, measureFont, measurementGraphics) + 4;
+            int textWidth = Math.Max(1, (int)Math.Ceiling(GetVisualWidth(visualOffsets)));
+
+            return new LayoutLine
+            {
+                SourceLine = sourceLine,
+                SourceText = sourceText,
+                Projection = projection,
+                VisualOffsets = visualOffsets,
+                Bounds = new Rectangle(left, topY, Math.Max(1, textWidth), Math.Max(1, lineHeight)),
+                TextX = left,
+                TextWidth = textWidth,
+                Kind = kind,
+                HeadingLevel = 0,
+                FontRole = LineFontRole.Base,
+                InlineRuns = runs,
+                IsRealized = true,
+                IsImagePreview = false,
+                ImageAltText = string.Empty,
+                ImageSource = string.Empty,
+                IsTaskListItem = false,
+                IsTaskChecked = false,
+                TaskMarkerSourceStart = -1,
+                TaskMarkerSourceLength = 0,
+                ListContentSourceStart = -1,
+                QuoteAdmonition = AdmonitionKind.None,
+                IsAdmonitionMarkerLine = false,
+                QuoteStartLine = -1,
+                QuoteEndLine = -1
+            };
+        }
+        finally
+        {
+            if (disposeMeasureFont)
+                measureFont.Dispose();
+        }
+    }
+
+    private void RebuildSimplePlainTextSemantics()
+    {
+        _semantics = new LineSemantic[_sourceLineCount];
+
+        for (int i = 0; i < _sourceLineCount; i++)
+        {
+            _semantics[i].Kind = string.IsNullOrWhiteSpace(_lines[i].SourceText)
+                ? MarkdownBlockKind.Blank
+                : MarkdownBlockKind.Paragraph;
+            _semantics[i].HeadingLevel = 0;
+            _semantics[i].IsCodeFenceStart = false;
+            _semantics[i].IsCodeFenceEnd = false;
+            _semantics[i].QuoteAdmonition = AdmonitionKind.None;
+            _semantics[i].IsAdmonitionMarkerLine = false;
+            _semantics[i].QuoteStartLine = -1;
+            _semantics[i].QuoteEndLine = -1;
+        }
+    }
+
+    private void RebuildLineIndexesAndMetrics()
+    {
+        _lineBySource.Clear();
+        _lineIndexBySource.Clear();
+
+        _lineTops = new int[_lines.Count];
+        int maxWidth = 1;
+        int contentBottom = 0;
+
+        for (int i = 0; i < _lines.Count; i++)
+        {
+            LayoutLine line = _lines[i];
+            _lineBySource[line.SourceLine] = line;
+            _lineIndexBySource[line.SourceLine] = i;
+            _lineTops[i] = line.Bounds.Top;
+
+            maxWidth = Math.Max(maxWidth, line.TextX + line.TextWidth + 24);
+            contentBottom = Math.Max(contentBottom, line.Bounds.Bottom);
+        }
+
+        _maxContentWidth = maxWidth;
+        ContentSize = new Size(
+            Math.Max(_lastViewport.Width, maxWidth),
+            Math.Max(_lastViewport.Height, contentBottom + 6));
+    }
+
     private bool ShouldMeasureVisualOffsetsEagerly(int sourceLine, int topY, Size viewport, int preferredSourceLine)
     {
         const int eagerViewportPadding = 1024;
@@ -1995,16 +2294,12 @@ public sealed class LayoutEngine
         if (line.VisualOffsets.Length > 0 || line.Projection.DisplayText.Length == 0)
             return line.VisualOffsets;
 
-        using var measurementBitmap = new Bitmap(1, 1);
-        measurementBitmap.SetResolution(_measurementDpiX, _measurementDpiY);
-        using var measurementGraphics = Graphics.FromImage(measurementBitmap);
-        measurementGraphics.PageUnit = GraphicsUnit.Pixel;
-        measurementGraphics.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
+        using var measurementGraphics = CreateMeasurementGraphics();
 
         Font measureFont = ResolveLineMeasureFont(line.Kind, line.HeadingLevel, line.FontRole, out bool disposeMeasureFont);
         try
         {
-            line.VisualOffsets = BuildVisualOffsets(line.Projection.DisplayText, line.InlineRuns, measureFont, measurementGraphics);
+            line.VisualOffsets = BuildVisualOffsets(line.Projection.DisplayText, line.InlineRuns, measureFont, measurementGraphics, preferExactPlainTextMeasurement: line.Kind == MarkdownBlockKind.Heading);
             return line.VisualOffsets;
         }
         finally
@@ -2014,7 +2309,7 @@ public sealed class LayoutEngine
         }
     }
 
-    private float[] BuildVisualOffsets(string displayText, IReadOnlyList<InlineRun> runs, Font baseFont, Graphics graphics)
+    private float[] BuildVisualOffsets(string displayText, IReadOnlyList<InlineRun> runs, Font baseFont, Graphics graphics, bool preferExactPlainTextMeasurement = false)
     {
         int visualLength = displayText.Length;
         var offsets = new float[visualLength + 1];
@@ -2022,8 +2317,15 @@ public sealed class LayoutEngine
         if (visualLength == 0)
             return offsets;
 
+        if (IsSimplePlainTextLine(displayText, runs))
+            return MeasurePrefixWidthsTextRenderer(graphics, displayText, baseFont, preferExactPlainTextMeasurement);
+
         if (runs.Count == 0)
-            return MeasurePrefixWidths(graphics, displayText, baseFont);
+        {
+            offsets = MeasurePrefixWidths(graphics, displayText, baseFont);
+            offsets[^1] = Math.Max(offsets[^1], MeasureRenderedLineWidth(displayText, runs, baseFont, graphics));
+            return offsets;
+        }
 
         int col = 0;
         float width = 0f;
@@ -2071,6 +2373,19 @@ public sealed class LayoutEngine
 
         offsets[^1] = Math.Max(offsets[^1], MeasureRenderedLineWidth(displayText, runs, baseFont, graphics));
         return offsets;
+    }
+
+    private static bool IsSimplePlainTextLine(string displayText, IReadOnlyList<InlineRun> runs)
+    {
+        if (runs.Count != 1)
+            return false;
+
+        InlineRun run = runs[0];
+        return !run.IsImage
+            && !run.IsLink
+            && !run.IsFootnoteReference
+            && run.Style == InlineStyle.None
+            && string.Equals(run.Text, displayText, StringComparison.Ordinal);
     }
 
     private static float GetVisualWidth(float[] offsets)
@@ -2235,12 +2550,15 @@ public sealed class LayoutEngine
         float layoutHeight = Math.Max(64f, font.GetHeight(graphics) * 4f);
         var layoutRect = new RectangleF(0, 0, 100000f, layoutHeight);
 
-        for (int batchStart = 1; batchStart <= text.Length; batchStart += maxRangesPerBatch)
+        // Prefix ranges (0..n) drift on longer lines with GDI+.
+        // Measuring individual glyph boxes and rebuilding boundaries from left/right edges
+        // tracks the actual painted text much more reliably.
+        for (int batchStart = 0; batchStart < text.Length; batchStart += maxRangesPerBatch)
         {
-            int count = Math.Min(maxRangesPerBatch, text.Length - batchStart + 1);
+            int count = Math.Min(maxRangesPerBatch, text.Length - batchStart);
             var ranges = new CharacterRange[count];
             for (int i = 0; i < count; i++)
-                ranges[i] = new CharacterRange(0, batchStart + i);
+                ranges[i] = new CharacterRange(batchStart + i, 1);
 
             using StringFormat format = (StringFormat)MeasureStringFormat.Clone();
             format.SetMeasurableCharacterRanges(ranges);
@@ -2252,17 +2570,90 @@ public sealed class LayoutEngine
                 {
                     int idx = batchStart + i;
                     RectangleF bounds = regions[i].GetBounds(graphics);
-                    offsets[idx] = Math.Max(offsets[idx - 1], bounds.Width);
+
+                    if (idx == 0)
+                        offsets[0] = 0f;
+
+                    offsets[idx] = Math.Max(offsets[idx], bounds.Left);
+                    offsets[idx + 1] = Math.Max(offsets[idx + 1], bounds.Right);
                 }
             }
             finally
             {
                 foreach (Region region in regions)
-                    region.Dispose();
+                region.Dispose();
             }
         }
 
+        for (int i = 1; i < offsets.Length; i++)
+            offsets[i] = Math.Max(offsets[i], offsets[i - 1]);
+
         return offsets;
+    }
+
+    private static float[] MeasurePrefixWidthsTextRenderer(Graphics graphics, string text, Font font, bool preferExactLoop = false)
+    {
+        var offsets = new float[text.Length + 1];
+        if (text.Length == 0)
+            return offsets;
+
+        if (!preferExactLoop && TryMeasurePrefixWidthsGdi(graphics, text, font, offsets))
+            return offsets;
+
+        Size proposed = new(100000, 1000);
+        int anchorWidth = TextRenderer.MeasureText("|", font, proposed, PlainTextMeasureFlags).Width;
+        offsets[0] = 0f;
+        for (int i = 1; i <= text.Length; i++)
+        {
+            int width = TextRenderer.MeasureText("|" + text[..i], font, proposed, PlainTextMeasureFlags).Width - anchorWidth;
+            offsets[i] = Math.Max(offsets[i - 1], width);
+        }
+
+        return offsets;
+    }
+
+    private static bool TryMeasurePrefixWidthsGdi(Graphics graphics, string text, Font font, float[] offsets)
+    {
+        IntPtr hdc = IntPtr.Zero;
+        IntPtr hfont = IntPtr.Zero;
+        IntPtr oldFont = IntPtr.Zero;
+
+        try
+        {
+            hdc = graphics.GetHdc();
+            hfont = font.ToHfont();
+            oldFont = SelectObject(hdc, hfont);
+
+            if (oldFont == IntPtr.Zero || oldFont == new IntPtr(-1))
+                return false;
+
+            var extents = new int[text.Length];
+            if (!GetTextExtentExPointW(hdc, text, text.Length, int.MaxValue, out _, extents, out _))
+                return false;
+
+            offsets[0] = 0f;
+            for (int i = 1; i <= text.Length; i++)
+                offsets[i] = Math.Max(offsets[i - 1], extents[i - 1]);
+
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+        finally
+        {
+            if (hdc != IntPtr.Zero)
+            {
+                if (oldFont != IntPtr.Zero && oldFont != new IntPtr(-1))
+                    SelectObject(hdc, oldFont);
+
+                graphics.ReleaseHdc(hdc);
+            }
+
+            if (hfont != IntPtr.Zero)
+                DeleteObject(hfont);
+        }
     }
 
     private static float MeasureInkWidth(Graphics graphics, string text, Font font)
@@ -2286,6 +2677,21 @@ public sealed class LayoutEngine
 
     private static int MeasureHeight(Graphics graphics, Font font)
         => (int)Math.Ceiling(font.GetHeight(graphics));
+
+    private static float MeasureAverageCharWidth(Graphics graphics, Font font)
+    {
+        const string sample = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+        float width = MeasureAdvanceWidth(graphics, sample, font);
+        return width / sample.Length;
+    }
+
+    private static int EstimateTextWidth(string displayText, float avgCharWidth)
+    {
+        if (string.IsNullOrEmpty(displayText))
+            return 1;
+
+        return (int)Math.Ceiling(displayText.Length * avgCharWidth) + 8;
+    }
 
     private static bool IsHorizontalRuleKind(MarkdownBlockKind kind)
         => kind == MarkdownBlockKind.HorizontalRule;
