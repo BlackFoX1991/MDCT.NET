@@ -1,5 +1,6 @@
 using System.Drawing.Printing;
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using MarkdownGdi;
 
 namespace MarkdownPad;
@@ -8,6 +9,7 @@ public partial class frmMain : Form
 {
     private const string AppTitle = "MarkdownPad";
     private const int MaxRecentFiles = 12;
+    private const int SwRestore = 9;
 
     private readonly List<string> _printLines = [];
     private readonly Queue<string> _pendingPrintSegments = [];
@@ -491,6 +493,18 @@ public partial class frmMain : Form
 
         UpdateUiState();
         return selectedTab;
+    }
+
+    internal void OpenExternalDocuments(IEnumerable<string> filePaths)
+    {
+        if (IsDisposed)
+            return;
+
+        IReadOnlyList<string> requestedFiles = [.. filePaths.Where(path => !string.IsNullOrWhiteSpace(path))];
+        if (requestedFiles.Count > 0)
+            OpenDocumentsFromPaths(requestedFiles);
+
+        RevealAndActivateWindow();
     }
 
     private bool SaveActiveDocument(bool forceSaveAs = false)
@@ -1353,6 +1367,21 @@ public partial class frmMain : Form
             // Keep application shutdown non-blocking even if the session file cannot be written.
         }
     }
+
+    private void RevealAndActivateWindow()
+    {
+        if (!Visible)
+            Show();
+
+        if (WindowState == FormWindowState.Minimized && IsHandleCreated)
+            ShowWindow(Handle, SwRestore);
+
+        Activate();
+        BringToFront();
+    }
+
+    [DllImport("user32.dll")]
+    private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
 
     private void aboutToolStripMenuItem_Click(object sender, EventArgs e)
     {
