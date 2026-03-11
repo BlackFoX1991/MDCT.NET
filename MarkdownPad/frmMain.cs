@@ -83,12 +83,18 @@ public partial class frmMain : Form
         pasteToolStripMenuItem.Click += (_, _) => ExecuteOnActiveEditor(editor => editor.PasteCommand());
         selectAllToolStripMenuItem.Click += (_, _) => ExecuteOnActiveEditor(editor => editor.SelectAllCommand());
 
+        tableDesignerToolStripMenuItem.Click += (_, _) => ShowTableDesigner();
+        heading1ToolStripMenuItem.Click += (_, _) => ApplyHeading(1);
+        heading2ToolStripMenuItem.Click += (_, _) => ApplyHeading(2);
+        heading3ToolStripMenuItem.Click += (_, _) => ApplyHeading(3);
+        heading4ToolStripMenuItem.Click += (_, _) => ApplyHeading(4);
+        heading5ToolStripMenuItem.Click += (_, _) => ApplyHeading(5);
+        heading6ToolStripMenuItem.Click += (_, _) => ApplyHeading(6);
+        quoteToolStripMenuItem.Click += (_, _) => ToggleQuoteBlock();
+        codeFenceToolStripMenuItem.Click += (_, _) => WrapSelectionInCodeFence();
+
         findToolStripMenuItem.Click += (_, _) => ShowFindDialog();
         findNextToolStripMenuItem.Click += (_, _) => FindNextInActiveDocument();
-
-        themeSystemToolStripMenuItem.Click += (_, _) => ApplyTheme(EditorThemeMode.System);
-        themeLightToolStripMenuItem.Click += (_, _) => ApplyTheme(EditorThemeMode.Light);
-        themeDarkToolStripMenuItem.Click += (_, _) => ApplyTheme(EditorThemeMode.Dark);
 
         UpdateThemeMenuChecks();
     }
@@ -103,6 +109,15 @@ public partial class frmMain : Form
         redoToolStripButton.Click += (_, _) => ExecuteOnActiveEditor(editor => editor.RedoCommand());
         findToolStripButton.Click += (_, _) => ShowFindDialog();
         findNextToolStripButton.Click += (_, _) => FindNextInActiveDocument();
+        tableToolStripButton.Click += (_, _) => ShowTableDesigner();
+        heading1ToolStripDropDownItem.Click += (_, _) => ApplyHeading(1);
+        heading2ToolStripDropDownItem.Click += (_, _) => ApplyHeading(2);
+        heading3ToolStripDropDownItem.Click += (_, _) => ApplyHeading(3);
+        heading4ToolStripDropDownItem.Click += (_, _) => ApplyHeading(4);
+        heading5ToolStripDropDownItem.Click += (_, _) => ApplyHeading(5);
+        heading6ToolStripDropDownItem.Click += (_, _) => ApplyHeading(6);
+        quoteToolStripButton.Click += (_, _) => ToggleQuoteBlock();
+        codeFenceToolStripButton.Click += (_, _) => WrapSelectionInCodeFence();
 
         themeSystemToolStripDropDownItem.Click += (_, _) => ApplyTheme(EditorThemeMode.System);
         themeLightToolStripDropDownItem.Click += (_, _) => ApplyTheme(EditorThemeMode.Light);
@@ -413,6 +428,42 @@ public partial class frmMain : Form
         RunFind(editor, dialog.SearchText, dialog.SelectedOptions);
     }
 
+    private void ShowTableDesigner()
+    {
+        padTab? tab = ActiveTab;
+        if (tab is null)
+            return;
+
+        MarkdownGdiEditor editor = tab.Editor;
+
+        using var dialog = new TableDesignerDialog();
+        if (dialog.ShowDialog(this) != DialogResult.OK)
+            return;
+
+        editor.InsertTableCommand(dialog.GeneratedMarkdown);
+        FocusEditor(tab);
+        SetStatusMessage("Table inserted");
+        UpdateUiState();
+    }
+
+    private void ApplyHeading(int level)
+    {
+        if (ExecuteOnActiveEditor(editor => editor.ApplyHeadingCommand(level)))
+            SetStatusMessage($"Heading H{level} applied");
+    }
+
+    private void ToggleQuoteBlock()
+    {
+        if (ExecuteOnActiveEditor(editor => editor.ToggleQuoteBlockCommand()))
+            SetStatusMessage("Quote formatting updated");
+    }
+
+    private void WrapSelectionInCodeFence()
+    {
+        if (ExecuteOnActiveEditor(editor => editor.WrapSelectionInCodeFenceCommand()))
+            SetStatusMessage("Code fence inserted");
+    }
+
     private void FindNextInActiveDocument()
     {
         MarkdownGdiEditor? editor = ActiveEditor;
@@ -628,6 +679,11 @@ public partial class frmMain : Form
         copyToolStripMenuItem.Enabled = hasEditor && editor!.CanCopy;
         pasteToolStripMenuItem.Enabled = hasEditor && editor!.CanPaste;
         selectAllToolStripMenuItem.Enabled = hasEditor && editor!.CanSelectAll;
+        formatToolStripMenuItem.Enabled = hasEditor;
+        tableDesignerToolStripMenuItem.Enabled = hasEditor;
+        headingToolStripMenuItem.Enabled = hasEditor;
+        quoteToolStripMenuItem.Enabled = hasEditor;
+        codeFenceToolStripMenuItem.Enabled = hasEditor;
 
         findToolStripMenuItem.Enabled = hasEditor;
         findNextToolStripMenuItem.Enabled = hasEditor && editor!.CanFindNext;
@@ -640,6 +696,10 @@ public partial class frmMain : Form
         redoToolStripButton.Enabled = hasEditor && editor!.CanRedo;
         findToolStripButton.Enabled = hasEditor;
         findNextToolStripButton.Enabled = hasEditor && editor!.CanFindNext;
+        tableToolStripButton.Enabled = hasEditor;
+        headingToolStripDropDownButton.Enabled = hasEditor;
+        quoteToolStripButton.Enabled = hasEditor;
+        codeFenceToolStripButton.Enabled = hasEditor;
 
         closeContextTabToolStripMenuItem.Enabled = tab is not null;
         closeOtherContextTabsToolStripMenuItem.Enabled = hasMultipleTabs;
@@ -674,10 +734,6 @@ public partial class frmMain : Form
 
     private void UpdateThemeMenuChecks()
     {
-        themeSystemToolStripMenuItem.Checked = _themeMode == EditorThemeMode.System;
-        themeLightToolStripMenuItem.Checked = _themeMode == EditorThemeMode.Light;
-        themeDarkToolStripMenuItem.Checked = _themeMode == EditorThemeMode.Dark;
-
         themeSystemToolStripDropDownItem.Checked = _themeMode == EditorThemeMode.System;
         themeLightToolStripDropDownItem.Checked = _themeMode == EditorThemeMode.Light;
         themeDarkToolStripDropDownItem.Checked = _themeMode == EditorThemeMode.Dark;
@@ -759,14 +815,15 @@ public partial class frmMain : Form
             tab.Editor.Focus();
     }
 
-    private void ExecuteOnActiveEditor(Action<MarkdownGdiEditor> action)
+    private bool ExecuteOnActiveEditor(Action<MarkdownGdiEditor> action)
     {
         MarkdownGdiEditor? editor = ActiveEditor;
         if (editor is null)
-            return;
+            return false;
 
         action(editor);
         UpdateUiState();
+        return true;
     }
 
     private void Tab_DocumentStateChanged(object? sender, EventArgs e)

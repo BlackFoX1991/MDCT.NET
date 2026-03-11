@@ -18,7 +18,7 @@ namespace MarkdownPad
 
         private void InitializeComponent()
         {
-            components = new System.ComponentModel.Container();
+            System.ComponentModel.ComponentResourceManager resources = new System.ComponentModel.ComponentResourceManager(typeof(FindDialog));
             queryLabel = new Label();
             queryTextBox = new TextBox();
             caseSensitiveCheckBox = new CheckBox();
@@ -39,26 +39,28 @@ namespace MarkdownPad
             // 
             queryLabel.Anchor = AnchorStyles.Left;
             queryLabel.AutoSize = true;
-            queryLabel.Location = new Point(3, 15);
+            queryLabel.Location = new Point(3, 6);
             queryLabel.Name = "queryLabel";
-            queryLabel.Size = new Size(67, 20);
+            queryLabel.Size = new Size(62, 15);
             queryLabel.TabIndex = 0;
             queryLabel.Text = "Find what:";
             // 
             // queryTextBox
             // 
             queryTextBox.Anchor = AnchorStyles.Left | AnchorStyles.Right;
-            queryTextBox.Location = new Point(99, 11);
+            queryTextBox.Location = new Point(89, 2);
+            queryTextBox.Margin = new Padding(3, 2, 3, 2);
             queryTextBox.Name = "queryTextBox";
-            queryTextBox.Size = new Size(306, 27);
+            queryTextBox.Size = new Size(266, 23);
             queryTextBox.TabIndex = 1;
             // 
             // caseSensitiveCheckBox
             // 
             caseSensitiveCheckBox.AutoSize = true;
-            caseSensitiveCheckBox.Location = new Point(99, 49);
+            caseSensitiveCheckBox.Location = new Point(89, 29);
+            caseSensitiveCheckBox.Margin = new Padding(3, 2, 3, 2);
             caseSensitiveCheckBox.Name = "caseSensitiveCheckBox";
-            caseSensitiveCheckBox.Size = new Size(251, 24);
+            caseSensitiveCheckBox.Size = new Size(86, 19);
             caseSensitiveCheckBox.TabIndex = 2;
             caseSensitiveCheckBox.Text = "Match case";
             caseSensitiveCheckBox.UseVisualStyleBackColor = true;
@@ -66,9 +68,10 @@ namespace MarkdownPad
             // wholeWordCheckBox
             // 
             wholeWordCheckBox.AutoSize = true;
-            wholeWordCheckBox.Location = new Point(99, 79);
+            wholeWordCheckBox.Location = new Point(89, 52);
+            wholeWordCheckBox.Margin = new Padding(3, 2, 3, 2);
             wholeWordCheckBox.Name = "wholeWordCheckBox";
-            wholeWordCheckBox.Size = new Size(137, 24);
+            wholeWordCheckBox.Size = new Size(151, 19);
             wholeWordCheckBox.TabIndex = 3;
             wholeWordCheckBox.Text = "Match whole word only";
             wholeWordCheckBox.UseVisualStyleBackColor = true;
@@ -76,9 +79,10 @@ namespace MarkdownPad
             // interpretEscapesCheckBox
             // 
             interpretEscapesCheckBox.AutoSize = true;
-            interpretEscapesCheckBox.Location = new Point(99, 109);
+            interpretEscapesCheckBox.Location = new Point(89, 75);
+            interpretEscapesCheckBox.Margin = new Padding(3, 2, 3, 2);
             interpretEscapesCheckBox.Name = "interpretEscapesCheckBox";
-            interpretEscapesCheckBox.Size = new Size(240, 24);
+            interpretEscapesCheckBox.Size = new Size(168, 19);
             interpretEscapesCheckBox.TabIndex = 4;
             interpretEscapesCheckBox.Text = "Interpret escape sequences";
             interpretEscapesCheckBox.UseVisualStyleBackColor = true;
@@ -86,9 +90,10 @@ namespace MarkdownPad
             // wrapAroundCheckBox
             // 
             wrapAroundCheckBox.AutoSize = true;
-            wrapAroundCheckBox.Location = new Point(99, 139);
+            wrapAroundCheckBox.Location = new Point(89, 98);
+            wrapAroundCheckBox.Margin = new Padding(3, 2, 3, 2);
             wrapAroundCheckBox.Name = "wrapAroundCheckBox";
-            wrapAroundCheckBox.Size = new Size(220, 24);
+            wrapAroundCheckBox.Size = new Size(189, 19);
             wrapAroundCheckBox.TabIndex = 5;
             wrapAroundCheckBox.Text = "Wrap around at document end";
             wrapAroundCheckBox.UseVisualStyleBackColor = true;
@@ -97,9 +102,9 @@ namespace MarkdownPad
             // 
             escapeModeLabel.Anchor = AnchorStyles.Left;
             escapeModeLabel.AutoSize = true;
-            escapeModeLabel.Location = new Point(3, 174);
+            escapeModeLabel.Location = new Point(3, 125);
             escapeModeLabel.Name = "escapeModeLabel";
-            escapeModeLabel.Size = new Size(93, 20);
+            escapeModeLabel.Size = new Size(80, 15);
             escapeModeLabel.TabIndex = 6;
             escapeModeLabel.Text = "Escape mode:";
             // 
@@ -108,9 +113,10 @@ namespace MarkdownPad
             escapeModeComboBox.Anchor = AnchorStyles.Left | AnchorStyles.Right;
             escapeModeComboBox.DropDownStyle = ComboBoxStyle.DropDownList;
             escapeModeComboBox.FormattingEnabled = true;
-            escapeModeComboBox.Location = new Point(99, 170);
+            escapeModeComboBox.Location = new Point(89, 121);
+            escapeModeComboBox.Margin = new Padding(3, 2, 3, 2);
             escapeModeComboBox.Name = "escapeModeComboBox";
-            escapeModeComboBox.Size = new Size(306, 28);
+            escapeModeComboBox.Size = new Size(266, 23);
             escapeModeComboBox.TabIndex = 7;
             // 
             // buttonPanel
@@ -120,9 +126,10 @@ namespace MarkdownPad
             buttonPanel.Controls.Add(findButton);
             buttonPanel.Dock = DockStyle.Fill;
             buttonPanel.FlowDirection = FlowDirection.RightToLeft;
-            buttonPanel.Location = new Point(99, 204);
+            buttonPanel.Location = new Point(89, 148);
+            buttonPanel.Margin = new Padding(3, 2, 3, 2);
             buttonPanel.Name = "buttonPanel";
-            buttonPanel.Size = new Size(306, 6);
+            buttonPanel.Size = new Size(266, 10);
             buttonPanel.TabIndex = 8;
             buttonPanel.WrapContents = false;
             // 
@@ -130,9 +137,10 @@ namespace MarkdownPad
             // 
             cancelButton.AutoSize = true;
             cancelButton.DialogResult = DialogResult.Cancel;
-            cancelButton.Location = new Point(209, 3);
+            cancelButton.Location = new Point(181, 2);
+            cancelButton.Margin = new Padding(3, 2, 3, 2);
             cancelButton.Name = "cancelButton";
-            cancelButton.Size = new Size(94, 30);
+            cancelButton.Size = new Size(82, 25);
             cancelButton.TabIndex = 1;
             cancelButton.Text = "Cancel";
             cancelButton.UseVisualStyleBackColor = true;
@@ -141,9 +149,10 @@ namespace MarkdownPad
             // 
             findButton.AutoSize = true;
             findButton.DialogResult = DialogResult.OK;
-            findButton.Location = new Point(130, 3);
+            findButton.Location = new Point(111, 2);
+            findButton.Margin = new Padding(3, 2, 3, 2);
             findButton.Name = "findButton";
-            findButton.Size = new Size(73, 30);
+            findButton.Size = new Size(64, 25);
             findButton.TabIndex = 0;
             findButton.Text = "Find";
             findButton.UseVisualStyleBackColor = true;
@@ -163,7 +172,8 @@ namespace MarkdownPad
             layoutPanel.Controls.Add(escapeModeComboBox, 1, 5);
             layoutPanel.Controls.Add(buttonPanel, 1, 6);
             layoutPanel.Dock = DockStyle.Fill;
-            layoutPanel.Location = new Point(12, 12);
+            layoutPanel.Location = new Point(10, 9);
+            layoutPanel.Margin = new Padding(3, 2, 3, 2);
             layoutPanel.Name = "layoutPanel";
             layoutPanel.RowCount = 7;
             layoutPanel.RowStyles.Add(new RowStyle());
@@ -173,22 +183,24 @@ namespace MarkdownPad
             layoutPanel.RowStyles.Add(new RowStyle());
             layoutPanel.RowStyles.Add(new RowStyle());
             layoutPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
-            layoutPanel.Size = new Size(408, 213);
+            layoutPanel.Size = new Size(358, 160);
             layoutPanel.TabIndex = 0;
             // 
             // FindDialog
             // 
             AcceptButton = findButton;
-            AutoScaleDimensions = new SizeF(8F, 20F);
+            AutoScaleDimensions = new SizeF(7F, 15F);
             AutoScaleMode = AutoScaleMode.Font;
             CancelButton = cancelButton;
-            ClientSize = new Size(432, 237);
+            ClientSize = new Size(378, 178);
             Controls.Add(layoutPanel);
             FormBorderStyle = FormBorderStyle.FixedDialog;
+            Icon = (Icon)resources.GetObject("$this.Icon");
+            Margin = new Padding(3, 2, 3, 2);
             MaximizeBox = false;
             MinimizeBox = false;
             Name = "FindDialog";
-            Padding = new Padding(12);
+            Padding = new Padding(10, 9, 10, 9);
             ShowInTaskbar = false;
             StartPosition = FormStartPosition.CenterParent;
             Text = "Find";

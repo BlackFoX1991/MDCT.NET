@@ -27,6 +27,9 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
     private static readonly Regex TaskMarkerRegex =
     new(@"\[(?<mark>[ xX])\]", RegexOptions.Compiled);
 
+    private static readonly Regex QuotePrefixRegex =
+        new(@"^(?<indent>\s*)>\s?", RegexOptions.Compiled);
+
 
     // Tables can be displayed non-destructively as raw source
     private readonly HashSet<int> _rawTableStartLines = new();
@@ -738,6 +741,182 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
     public void UndoCommand() => Undo();
 
     public void RedoCommand() => Redo();
+
+    public void ApplyHeadingCommand(int level)
+    {
+        level = Math.Clamp(level, 1, 6);
+
+        ApplyDocumentEdit(() =>
+        {
+            if (!TryGetAffectedLineRange(out int startLine, out int endLine))
+                return false;
+
+            bool hadSelection = _state.HasSelection;
+            MarkdownPosition beforeCaret = _state.Caret;
+            var originalLines = new List<string>();
+            var updatedLines = new List<string>();
+            bool changed = false;
+
+            for (int line = startLine; line <= endLine; line++)
+            {
+                string original = _doc.GetLine(line);
+                string updated = ApplyHeadingLevel(original, level);
+
+                originalLines.Add(original);
+                updatedLines.Add(updated);
+                changed |= !string.Equals(original, updated, StringComparison.Ordinal);
+            }
+
+            if (!changed)
+                return false;
+
+            _doc.ReplaceLines(startLine, endLine, updatedLines);
+
+            if (hadSelection)
+            {
+                SetSelectionToLineRange(startLine, updatedLines);
+                return true;
+            }
+
+            int targetIndex = beforeCaret.Line - startLine;
+            string originalTargetLine = originalLines[targetIndex];
+            string updatedTargetLine = updatedLines[targetIndex];
+            int originalContentStart = GetHeadingContentStart(originalTargetLine);
+            int newPrefixLength = GetHeadingPrefixLength(updatedTargetLine);
+            int newColumn = beforeCaret.Column <= originalContentStart
+                ? newPrefixLength
+                : newPrefixLength + (beforeCaret.Column - originalContentStart);
+
+            _state.Restore(
+                new MarkdownPosition(beforeCaret.Line, Math.Clamp(newColumn, 0, updatedTargetLine.Length)),
+                null,
+                _doc);
+
+            return true;
+        });
+    }
+
+    public void ToggleQuoteBlockCommand()
+    {
+        ApplyDocumentEdit(() =>
+        {
+            if (!TryGetAffectedLineRange(out int startLine, out int endLine))
+                return false;
+
+            bool hadSelection = _state.HasSelection;
+            MarkdownPosition beforeCaret = _state.Caret;
+            var originalLines = new List<string>();
+            var updatedLines = new List<string>();
+
+            for (int line = startLine; line <= endLine; line++)
+                originalLines.Add(_doc.GetLine(line));
+
+            bool removeQuote = originalLines.All(line => TryGetQuotePrefixRange(line, out _, out _));
+            bool changed = false;
+
+            foreach (string original in originalLines)
+            {
+                string updated = removeQuote
+                    ? RemoveQuotePrefix(original)
+                    : AddQuotePrefix(original);
+
+                updatedLines.Add(updated);
+                changed |= !string.Equals(original, updated, StringComparison.Ordinal);
+            }
+
+            if (!changed)
+                return false;
+
+            _doc.ReplaceLines(startLine, endLine, updatedLines);
+
+            if (hadSelection)
+            {
+                SetSelectionToLineRange(startLine, updatedLines);
+                return true;
+            }
+
+            int targetIndex = beforeCaret.Line - startLine;
+            string originalTargetLine = originalLines[targetIndex];
+            string updatedTargetLine = updatedLines[targetIndex];
+            int newColumn = removeQuote
+                ? AdjustColumnForQuoteRemoval(beforeCaret.Column, originalTargetLine)
+                : AdjustColumnForQuoteAddition(beforeCaret.Column, originalTargetLine);
+
+            _state.Restore(
+                new MarkdownPosition(beforeCaret.Line, Math.Clamp(newColumn, 0, updatedTargetLine.Length)),
+                null,
+                _doc);
+
+            return true;
+        });
+    }
+
+    public void WrapSelectionInCodeFenceCommand()
+    {
+        ApplyDocumentEdit(() =>
+        {
+            if (!TryGetAffectedLineRange(out int startLine, out int endLine))
+                return false;
+
+            bool hadSelection = _state.HasSelection;
+            MarkdownPosition beforeCaret = _state.Caret;
+            var sourceLines = new List<string>();
+
+            for (int line = startLine; line <= endLine; line++)
+                sourceLines.Add(_doc.GetLine(line));
+
+            string fence = CreateFenceMarker(string.Join('\n', sourceLines));
+            var replacementLines = new List<string>(sourceLines.Count + 2) { fence };
+            replacementLines.AddRange(sourceLines);
+            replacementLines.Add(fence);
+
+            _doc.ReplaceLines(startLine, endLine, replacementLines);
+
+            if (hadSelection)
+            {
+                MarkdownPosition selectionStart = new(startLine + 1, 0);
+                MarkdownPosition selectionEnd = new(startLine + sourceLines.Count, sourceLines[^1].Length);
+                _state.Restore(selectionEnd, selectionStart, _doc);
+                return true;
+            }
+
+            int targetIndex = beforeCaret.Line - startLine;
+            int targetColumn = Math.Min(beforeCaret.Column, sourceLines[targetIndex].Length);
+            _state.Restore(new MarkdownPosition(beforeCaret.Line + 1, targetColumn), null, _doc);
+            return true;
+        });
+    }
+
+    public void InsertTableCommand(string markdown)
+    {
+        string normalized = NormalizeMarkdownInsertion(markdown);
+        if (string.IsNullOrEmpty(normalized))
+            return;
+
+        string[] tableLines = normalized.Split('\n');
+
+        ApplyDocumentEdit(() =>
+        {
+            if (_state.HasSelection)
+                return _state.InsertText(_doc, normalized);
+
+            int lineIndex = _state.Caret.Line;
+            if (string.IsNullOrWhiteSpace(_doc.GetLine(lineIndex)))
+            {
+                _doc.ReplaceLines(lineIndex, lineIndex, tableLines);
+                _state.Restore(new MarkdownPosition(lineIndex, 0), null, _doc);
+                return true;
+            }
+
+            var blockLines = new List<string>(tableLines.Length + 2) { string.Empty };
+            blockLines.AddRange(tableLines);
+            blockLines.Add(string.Empty);
+
+            _doc.ReplaceLines(lineIndex + 1, lineIndex, blockLines);
+            _state.Restore(new MarkdownPosition(lineIndex + 2, 0), null, _doc);
+            return true;
+        });
+    }
 
 
     void ISupportInitialize.EndInit()
@@ -2776,6 +2955,173 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         Invalidate();
 
         MarkdownChanged?.Invoke(this, new MarkdownChangedEventArgs(_doc.ToMarkdown()));
+    }
+
+    private bool TryGetAffectedLineRange(out int startLine, out int endLine)
+    {
+        if (_doc.LineCount <= 0)
+        {
+            startLine = endLine = 0;
+            return false;
+        }
+
+        if (!_state.HasSelection)
+        {
+            startLine = Math.Clamp(_state.Caret.Line, 0, _doc.LineCount - 1);
+            endLine = startLine;
+            return true;
+        }
+
+        var (selectionStart, selectionEnd) = _state.GetSelection();
+        startLine = Math.Clamp(selectionStart.Line, 0, _doc.LineCount - 1);
+        endLine = Math.Clamp(selectionEnd.Line, 0, _doc.LineCount - 1);
+
+        if (selectionEnd.Column == 0 && endLine > startLine)
+            endLine--;
+
+        return endLine >= startLine;
+    }
+
+    private void SetSelectionToLineRange(int startLine, IReadOnlyList<string> lines)
+    {
+        int endLine = startLine + lines.Count - 1;
+        MarkdownPosition selectionStart = new(startLine, 0);
+        MarkdownPosition selectionEnd = new(endLine, lines[^1].Length);
+        _state.Restore(selectionEnd, selectionStart, _doc);
+    }
+
+    private static string ApplyHeadingLevel(string line, int level)
+    {
+        string headingMarker = new('#', Math.Clamp(level, 1, 6));
+        int contentStart = GetHeadingContentStart(line);
+        string content = contentStart >= line.Length ? string.Empty : line[contentStart..];
+        return string.IsNullOrEmpty(content)
+            ? $"{headingMarker} "
+            : $"{headingMarker} {content}";
+    }
+
+    private static int GetHeadingContentStart(string line)
+    {
+        if (string.IsNullOrEmpty(line))
+            return 0;
+
+        int firstNonWhitespace = GetLeadingWhitespaceLength(line);
+        int index = firstNonWhitespace;
+        int hashes = 0;
+
+        while (index < line.Length && hashes < 6 && line[index] == '#')
+        {
+            index++;
+            hashes++;
+        }
+
+        if (hashes > 0 && (index >= line.Length || char.IsWhiteSpace(line[index])))
+        {
+            while (index < line.Length && char.IsWhiteSpace(line[index]))
+                index++;
+
+            return index;
+        }
+
+        return firstNonWhitespace;
+    }
+
+    private static int GetHeadingPrefixLength(string line)
+    {
+        int index = 0;
+        while (index < line.Length && line[index] == '#')
+            index++;
+
+        if (index < line.Length && line[index] == ' ')
+            index++;
+
+        return index;
+    }
+
+    private static string AddQuotePrefix(string line)
+    {
+        int insertAt = GetLeadingWhitespaceLength(line);
+        return line.Insert(insertAt, "> ");
+    }
+
+    private static string RemoveQuotePrefix(string line)
+    {
+        return TryGetQuotePrefixRange(line, out int start, out int length)
+            ? line.Remove(start, length)
+            : line;
+    }
+
+    private static bool TryGetQuotePrefixRange(string line, out int start, out int length)
+    {
+        Match match = QuotePrefixRegex.Match(line);
+        if (!match.Success)
+        {
+            start = 0;
+            length = 0;
+            return false;
+        }
+
+        start = match.Groups["indent"].Length;
+        length = match.Length - start;
+        return length > 0;
+    }
+
+    private static int AdjustColumnForQuoteAddition(int column, string line)
+    {
+        int insertAt = GetLeadingWhitespaceLength(line);
+        return column < insertAt ? column : column + 2;
+    }
+
+    private static int AdjustColumnForQuoteRemoval(int column, string line)
+    {
+        if (!TryGetQuotePrefixRange(line, out int start, out int length))
+            return column;
+
+        if (column <= start)
+            return column;
+
+        if (column <= start + length)
+            return start;
+
+        return column - length;
+    }
+
+    private static int GetLeadingWhitespaceLength(string line)
+    {
+        int index = 0;
+        while (index < line.Length && char.IsWhiteSpace(line[index]))
+            index++;
+
+        return index;
+    }
+
+    private static string CreateFenceMarker(string content)
+    {
+        int longestRun = 0;
+        int currentRun = 0;
+
+        foreach (char ch in content)
+        {
+            if (ch == '`')
+            {
+                currentRun++;
+                longestRun = Math.Max(longestRun, currentRun);
+            }
+            else
+            {
+                currentRun = 0;
+            }
+        }
+
+        return new string('`', Math.Max(3, longestRun + 1));
+    }
+
+    private static string NormalizeMarkdownInsertion(string markdown)
+    {
+        return (markdown ?? string.Empty)
+            .Replace("\r\n", "\n")
+            .Replace('\r', '\n')
+            .Trim('\n');
     }
 
     private void Undo()
