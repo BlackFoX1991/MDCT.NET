@@ -2258,6 +2258,8 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         base.OnPaint(e);
 
         e.Graphics.ResetTransform();
+        e.Graphics.PageUnit = GraphicsUnit.Pixel;
+        e.Graphics.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
         e.Graphics.Clear(BackColor);
 
         e.Graphics.TranslateTransform(AutoScrollPosition.X, AutoScrollPosition.Y);
@@ -2431,8 +2433,8 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
                 Font baseFont = (r == 0) ? _boldFont : Font;
 
                 int textWidth = runs.Count > 0
-                    ? MeasureInlineRunsWidthForTable(runs, baseFont)
-                    : MeasureWidth(fallbackText, baseFont);
+                    ? MeasureInlineRunsWidthForTable(g, runs, baseFont)
+                    : MeasureWidth(g, fallbackText, baseFont);
 
                 int x = textRect.Left;
                 string align = table.GetColumnAlignment(c).ToString();
@@ -2443,7 +2445,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
                     x = textRect.Right - textWidth;
 
                 x = Math.Max(textRect.Left, x);
-                int y = textRect.Top + Math.Max(0, (textRect.Height - MeasureHeight(baseFont)) / 2);
+                int y = textRect.Top + Math.Max(0, (textRect.Height - MeasureHeight(g, baseFont)) / 2);
 
                 if (runs.Count > 0)
                     DrawInlineRunsInCell(g, runs, baseFont, new Point(x, y), textRect, ForeColor);
@@ -2456,7 +2458,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         g.DrawRectangle(outer, table.Bounds);
     }
 
-    private int MeasureInlineRunsWidthForTable(IReadOnlyList<InlineRun> runs, Font baseFont)
+    private int MeasureInlineRunsWidthForTable(Graphics g, IReadOnlyList<InlineRun> runs, Font baseFont)
     {
         if (runs.Count == 0) return 0;
 
@@ -2472,7 +2474,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
                 bool isCode = (run.Style & InlineStyle.Code) != 0;
                 Font f = GetOrCreateTableRunFont(cache, baseFont, run.Style, isCode);
 
-                int w = MeasureWidth(run.Text, f);
+                int w = MeasureWidth(g, run.Text, f);
                 if (isCode) w += InlineCodePadX * 2;
                 width += w;
             }
@@ -2532,12 +2534,12 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
                 if (!isCode)
                 {
                     DrawTextGdiPlus(g, run.Text, runFont, new Point(x, start.Y), color);
-                    x += MeasureWidth(run.Text, runFont);
+                    x += MeasureWidth(g, run.Text, runFont);
                     continue;
                 }
 
-                int textW = MeasureWidth(run.Text, runFont);
-                int textH = MeasureHeight(runFont);
+                int textW = MeasureWidth(g, run.Text, runFont);
+                int textH = MeasureHeight(g, runFont);
 
                 int chipW = textW + InlineCodePadX * 2;
                 int chipH = Math.Min(clipRectContent.Height, textH + InlineCodePadY * 2);
@@ -2562,17 +2564,45 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         }
     }
 
-    private static int MeasureHeight(Font font) => (int)Math.Ceiling(font.GetHeight());
+    private int MeasureHeight(Font font)
+    {
+        using var bmp = new Bitmap(1, 1);
+        bmp.SetResolution(Math.Max(1f, DeviceDpi), Math.Max(1f, DeviceDpi));
+        using var g = Graphics.FromImage(bmp);
+        return MeasureHeight(g, font);
+    }
 
-    private static int MeasureWidth(string text, Font font)
+    private int MeasureWidth(string text, Font font)
     {
         if (string.IsNullOrEmpty(text)) return 0;
 
         using var bmp = new Bitmap(1, 1);
+        bmp.SetResolution(Math.Max(1f, DeviceDpi), Math.Max(1f, DeviceDpi));
         using var g = Graphics.FromImage(bmp);
 
-        var size = g.MeasureString(text, font, int.MaxValue, MeasureStringFormat);
-        return (int)Math.Ceiling(size.Width);
+        return MeasureWidth(g, text, font);
+    }
+
+    private static int MeasureHeight(Graphics g, Font font) => (int)Math.Ceiling(font.GetHeight(g));
+
+    private static int MeasureWidth(Graphics g, string text, Font font)
+    {
+        if (string.IsNullOrEmpty(text)) return 0;
+
+        using StringFormat format = (StringFormat)MeasureStringFormat.Clone();
+        format.SetMeasurableCharacterRanges([new CharacterRange(0, text.Length)]);
+
+        Region[] regions = g.MeasureCharacterRanges(text, font, new RectangleF(0, 0, 10000, 1000), format);
+        try
+        {
+            RectangleF bounds = regions[0].GetBounds(g);
+            return (int)Math.Ceiling(bounds.Width);
+        }
+        finally
+        {
+            foreach (Region region in regions)
+                region.Dispose();
+        }
     }
 
     private static void DrawTextGdiPlus(Graphics g, string text, Font font, Point pt, Color color)
@@ -2612,16 +2642,12 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
             visEnd = Math.Clamp(visEnd, 0, display.Length);
             if (visEnd <= visStart) continue;
 
-            int x1 = line.TextX + MeasureVisualPrefix(line, visStart);
-            int x2 = line.TextX + MeasureVisualPrefix(line, visEnd);
+            float x1 = SnapVisualX(line.TextX + MeasureVisualPrefix(line, visStart));
+            float x2 = SnapVisualX(line.TextX + MeasureVisualPrefix(line, visEnd));
+            float width = Math.Max(1f, x2 - x1);
+            float height = Math.Max(1f, line.Bounds.Height - 2);
 
-            var rect = new Rectangle(
-                x1,
-                line.Bounds.Top + 1,
-                Math.Max(1, x2 - x1),
-                Math.Max(1, line.Bounds.Height - 2));
-
-            g.FillRectangle(brush, rect);
+            g.FillRectangle(brush, x1, line.Bounds.Top + 1, width, height);
         }
 
         // B) Grid-Table-Selection (visuelle Tabellenzellen)
@@ -2760,14 +2786,14 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         if (glyph != '☐' && glyph != '☑')
             return false;
 
-        int x1 = line.TextX + MeasureVisualPrefix(line, checkboxGlyphVisStart);
-        int x2 = line.TextX + MeasureVisualPrefix(line, checkboxGlyphVisStart + 1);
+        float x1 = SnapVisualX(line.TextX + MeasureVisualPrefix(line, checkboxGlyphVisStart));
+        float x2 = SnapVisualX(line.TextX + MeasureVisualPrefix(line, checkboxGlyphVisStart + 1));
 
         const int padX = 4;
         rect = Rectangle.FromLTRB(
-            x1 - padX,
+            (int)Math.Floor(x1) - padX,
             line.Bounds.Top,
-            x2 + padX,
+            (int)Math.Ceiling(x2) + padX,
             line.Bounds.Bottom);
 
         return true;
@@ -2813,7 +2839,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         string display = line.Projection.DisplayText;
         visCol = Math.Clamp(visCol, 0, display.Length);
 
-        int x = line.TextX + MeasureVisualPrefix(line, visCol);
+        float x = SnapVisualX(line.TextX + MeasureVisualPrefix(line, visCol));
 
         using var p = new Pen(ForeColor, 1f);
         g.DrawLine(p, x, line.Bounds.Top + 2, x, line.Bounds.Bottom - 2);
@@ -3284,6 +3310,8 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
             Font,
             _boldFont,
             _monoFont,
+            DeviceDpi,
+            DeviceDpi,
             _rawTableStartLines,
             rawCodeFenceStarts,
             rawSourceLines,
@@ -3510,7 +3538,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         string display = line.Projection.DisplayText;
         visCol = Math.Clamp(visCol, 0, display.Length);
 
-        int caretX = line.TextX + MeasureVisualPrefix(line, visCol);
+        int caretX = (int)Math.Round(SnapVisualX(line.TextX + MeasureVisualPrefix(line, visCol)));
         int caretY = line.Bounds.Top;
 
         int viewLeft = -AutoScrollPosition.X;
@@ -3618,12 +3646,12 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
                 if (!isCode)
                 {
                     DrawTextGdiPlus(g, run.Text, runFont, new Point(x, contentTextStart.Y), ForeColor);
-                    x += MeasureWidth(run.Text, runFont);
+                    x += MeasureWidth(g, run.Text, runFont);
                     continue;
                 }
 
-                int textW = MeasureWidth(run.Text, runFont);
-                int textH = MeasureHeight(runFont);
+                int textW = MeasureWidth(g, run.Text, runFont);
+                int textH = MeasureHeight(g, runFont);
 
                 int chipW = textW + InlineCodePadX * 2;
                 int chipH = Math.Max(1, textH + InlineCodePadY * 2);
@@ -3647,9 +3675,12 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         }
     }
 
-    private int MeasureVisualPrefix(LayoutLine line, int visualCols)
+    private static float SnapVisualX(float x)
+        => (float)Math.Round(x, MidpointRounding.AwayFromZero);
+
+    private float MeasureVisualPrefix(LayoutLine line, int visualCols)
     {
-        int[] offsets = line.VisualOffsets;
+        float[] offsets = line.VisualOffsets;
         if (offsets.Length == 0)
             return 0;
 

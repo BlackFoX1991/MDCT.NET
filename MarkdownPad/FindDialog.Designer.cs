@@ -129,7 +129,7 @@ namespace MarkdownPad
             buttonPanel.Location = new Point(89, 148);
             buttonPanel.Margin = new Padding(3, 2, 3, 2);
             buttonPanel.Name = "buttonPanel";
-            buttonPanel.Size = new Size(266, 10);
+            buttonPanel.Size = new Size(266, 31);
             buttonPanel.TabIndex = 8;
             buttonPanel.WrapContents = false;
             // 
@@ -183,7 +183,7 @@ namespace MarkdownPad
             layoutPanel.RowStyles.Add(new RowStyle());
             layoutPanel.RowStyles.Add(new RowStyle());
             layoutPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
-            layoutPanel.Size = new Size(358, 160);
+            layoutPanel.Size = new Size(358, 181);
             layoutPanel.TabIndex = 0;
             // 
             // FindDialog
@@ -192,7 +192,7 @@ namespace MarkdownPad
             AutoScaleDimensions = new SizeF(7F, 15F);
             AutoScaleMode = AutoScaleMode.Font;
             CancelButton = cancelButton;
-            ClientSize = new Size(378, 178);
+            ClientSize = new Size(378, 199);
             Controls.Add(layoutPanel);
             FormBorderStyle = FormBorderStyle.FixedDialog;
             Icon = (Icon)resources.GetObject("$this.Icon");

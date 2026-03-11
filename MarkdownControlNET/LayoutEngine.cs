@@ -1,6 +1,8 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Drawing;
+using System.Drawing.Drawing2D;
+using System.Drawing.Text;
 using System.Linq;
 using System.Windows.Forms;
 
@@ -18,7 +20,7 @@ public sealed class LayoutLine
     public required int SourceLine { get; init; }
     public required string SourceText { get; init; }
     public required VisualProjection Projection { get; init; }
-    public required int[] VisualOffsets { get; init; }
+    public required float[] VisualOffsets { get; init; }
     public required Rectangle Bounds { get; init; }
     public required int TextX { get; init; }
     public required int TextWidth { get; init; }
@@ -132,8 +134,13 @@ public sealed class LayoutEngine
 
     public Size ContentSize { get; private set; } = new(1, 1);
 
-    private static readonly TextFormatFlags MeasureFlags =
-        TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine;
+    private static readonly StringFormat MeasureStringFormat = new(StringFormat.GenericTypographic)
+    {
+        FormatFlags = StringFormatFlags.NoWrap | StringFormatFlags.MeasureTrailingSpaces,
+        Trimming = StringTrimming.None,
+        Alignment = StringAlignment.Near,
+        LineAlignment = StringAlignment.Near
+    };
 
     private readonly record struct CodeFenceSpan(
         int StartLine,
@@ -149,7 +156,7 @@ public sealed class LayoutEngine
     private const int TableCodeChipPadX = 4;
     private const int InlineCodeChipPadX = 4;
 
-    private int MeasureInlineRunsWidthForTableLayout(IReadOnlyList<InlineRun> runs, Font baseFont)
+    private int MeasureInlineRunsWidthForTableLayout(IReadOnlyList<InlineRun> runs, Font baseFont, Graphics graphics)
     {
         if (runs.Count == 0) return 0;
 
@@ -176,7 +183,7 @@ public sealed class LayoutEngine
                     cache[key] = f;
                 }
 
-                int w = MeasureWidth(run.Text, f);
+                int w = MeasureWidth(graphics, run.Text, f);
                 if (isCode) w += TableCodeChipPadX * 2;
 
                 width += w;
@@ -461,6 +468,8 @@ public sealed class LayoutEngine
         Font baseFont,
         Font boldFont,
         Font monoFont,
+        float dpiX,
+        float dpiY,
         IReadOnlySet<int>? forceRawTableStarts = null,
         IReadOnlySet<int>? forceRawCodeFenceStarts = null,
         IReadOnlySet<int>? forceRawLines = null,
@@ -485,6 +494,12 @@ public sealed class LayoutEngine
             ContentSize = new Size(Math.Max(1, viewport.Width), Math.Max(1, viewport.Height));
             return;
         }
+
+        using var measurementBitmap = new Bitmap(1, 1);
+        measurementBitmap.SetResolution(Math.Max(1f, dpiX), Math.Max(1f, dpiY));
+        using var measurementGraphics = Graphics.FromImage(measurementBitmap);
+        measurementGraphics.PageUnit = GraphicsUnit.Pixel;
+        measurementGraphics.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
 
         var semantics = BuildSemantics(doc);
 
@@ -552,7 +567,7 @@ public sealed class LayoutEngine
             // Render table as grid
             if (tableStarts.TryGetValue(lineIdx, out var tb))
             {
-                var tableLayout = BuildTableLayout(tb, y);
+                var tableLayout = BuildTableLayout(tb, y, measurementGraphics);
                 _tables.Add(tableLayout);
                 _tableByStartLine[tableLayout.StartLine] = tableLayout;
 
@@ -731,16 +746,16 @@ public sealed class LayoutEngine
                     }
                 }
 
-                int lineHeight = MeasureHeight(measureFont) + 4;
+                int lineHeight = MeasureHeight(measurementGraphics, measureFont) + 4;
                 if (sem.Kind == MarkdownBlockKind.Heading)
                     lineHeight += 2;
                 else if (isHorizontalRule && !forceRawThisLine)
                     lineHeight = Math.Max(lineHeight, 14);
 
+                float[] visualOffsets = BuildVisualOffsets(proj.DisplayText, runs, measureFont, measurementGraphics);
                 int textWidth = (isHorizontalRule && !forceRawThisLine)
                     ? Math.Max(1, viewport.Width - left - 12)
-                    : Math.Max(1, MeasureInlineRunsWidth(runs, measureFont));
-                int[] visualOffsets = BuildVisualOffsets(proj.DisplayText, runs, measureFont);
+                    : Math.Max(1, (int)Math.Ceiling(GetVisualWidth(visualOffsets)));
 
                 var line = new LayoutLine
                 {
@@ -906,7 +921,7 @@ public sealed class LayoutEngine
             }
         }
 
-        int localX = contentPoint.X - best.TextX;
+        float localX = contentPoint.X - best.TextX;
         int visCol = ColumnFromX(best.VisualOffsets, localX);
 
         visCol = Math.Clamp(visCol, 0, best.Projection.VisualToSource.Length - 1);
@@ -917,7 +932,7 @@ public sealed class LayoutEngine
         return new MarkdownPosition(best.SourceLine, srcCol);
     }
 
-    private TableLayout BuildTableLayout(TableBlock block, int topY)
+    private TableLayout BuildTableLayout(TableBlock block, int topY, Graphics graphics)
     {
         TableModel model = TableModel.FromBlock(block);
         model.Normalize();
@@ -959,8 +974,8 @@ public sealed class LayoutEngine
                 Font measureFont = (r == 0) ? _boldFont : _baseFont;
 
                 int contentW = parsed.Runs.Count > 0
-                    ? MeasureInlineRunsWidthForTableLayout(parsed.Runs, measureFont)
-                    : MeasureWidth(parsed.Text, measureFont);
+                    ? MeasureInlineRunsWidthForTableLayout(parsed.Runs, measureFont, graphics)
+                    : MeasureWidth(graphics, parsed.Text, measureFont);
 
                 w = Math.Max(w, contentW + cellPadX * 2);
             }
@@ -968,7 +983,7 @@ public sealed class LayoutEngine
             colWidths[c] = w;
         }
 
-        int baseHeight = MeasureHeight(_baseFont) + cellPadY * 2;
+        int baseHeight = MeasureHeight(graphics, _baseFont) + cellPadY * 2;
         for (int r = 0; r < rows; r++)
             rowHeights[r] = baseHeight;
 
@@ -1175,7 +1190,7 @@ public sealed class LayoutEngine
         return previousDist <= nextDist ? previous : next;
     }
 
-    private static int ColumnFromX(int[] visualOffsets, int localX)
+    private static int ColumnFromX(float[] visualOffsets, float localX)
     {
         if (visualOffsets.Length == 0 || localX <= 0)
             return 0;
@@ -1190,63 +1205,24 @@ public sealed class LayoutEngine
         if (idx >= visualOffsets.Length)
             return visualOffsets.Length - 1;
 
-        int left = visualOffsets[idx - 1];
-        int right = visualOffsets[idx];
+        float left = visualOffsets[idx - 1];
+        float right = visualOffsets[idx];
         return (localX - left) <= (right - localX) ? idx - 1 : idx;
     }
 
-    private int MeasureInlineRunsWidth(IReadOnlyList<InlineRun> runs, Font baseFont)
-    {
-        if (runs.Count == 0) return 0;
-
-        int width = 0;
-        var cache = new Dictionary<int, Font>();
-
-        try
-        {
-            foreach (var run in runs)
-            {
-                if (string.IsNullOrEmpty(run.Text)) continue;
-
-                bool isCode = (run.Style & InlineStyle.Code) != 0;
-                Font f = GetOrCreateRunFont(cache, baseFont, run.Style, isCode);
-                width += MeasureWidth(run.Text, f);
-
-                if (isCode)
-                    width += InlineCodeChipPadX * 2;
-            }
-        }
-        finally
-        {
-            foreach (var kv in cache)
-                kv.Value.Dispose();
-        }
-
-        return width;
-    }
-
-    private int[] BuildVisualOffsets(string displayText, IReadOnlyList<InlineRun> runs, Font baseFont)
+    private float[] BuildVisualOffsets(string displayText, IReadOnlyList<InlineRun> runs, Font baseFont, Graphics graphics)
     {
         int visualLength = displayText.Length;
-        var offsets = new int[visualLength + 1];
+        var offsets = new float[visualLength + 1];
 
         if (visualLength == 0)
             return offsets;
 
         if (runs.Count == 0)
-        {
-            int x = 0;
-            for (int i = 0; i < visualLength; i++)
-            {
-                x += MeasureWidth(displayText[i].ToString(), baseFont);
-                offsets[i + 1] = x;
-            }
-
-            return offsets;
-        }
+            return MeasurePrefixWidths(graphics, displayText, baseFont);
 
         int col = 0;
-        int width = 0;
+        float width = 0f;
         var cache = new Dictionary<int, Font>();
 
         try
@@ -1262,17 +1238,71 @@ public sealed class LayoutEngine
                 if (isCode)
                     width += InlineCodeChipPadX;
 
-                for (int i = 0; i < run.Text.Length; i++)
+                float[] runOffsets = MeasurePrefixWidths(graphics, run.Text, runFont);
+                for (int i = 1; i < runOffsets.Length; i++)
                 {
-                    width += MeasureWidth(run.Text[i].ToString(), runFont);
                     col++;
-                    offsets[col] = width;
+                    offsets[col] = width + runOffsets[i];
                 }
 
                 if (isCode)
+                    offsets[col] += InlineCodeChipPadX;
+
+                width = offsets[col];
+            }
+        }
+        finally
+        {
+            foreach (var kv in cache)
+                kv.Value.Dispose();
+        }
+
+        offsets[^1] = Math.Max(offsets[^1], MeasureRenderedLineWidth(displayText, runs, baseFont, graphics));
+        return offsets;
+    }
+
+    private static float GetVisualWidth(float[] offsets)
+        => offsets.Length == 0 ? 0 : offsets[^1];
+
+    private float MeasureRenderedLineWidth(string displayText, IReadOnlyList<InlineRun> runs, Font baseFont, Graphics graphics)
+    {
+        if (string.IsNullOrEmpty(displayText))
+            return 0;
+
+        if (runs.Count == 0)
+            return Math.Max(
+                MeasureAdvanceWidth(graphics, displayText, baseFont),
+                MeasureInkWidth(graphics, displayText, baseFont));
+
+        float width = 0f;
+        var cache = new Dictionary<int, Font>();
+
+        try
+        {
+            for (int i = 0; i < runs.Count; i++)
+            {
+                InlineRun run = runs[i];
+                if (string.IsNullOrEmpty(run.Text))
+                    continue;
+
+                bool isCode = (run.Style & InlineStyle.Code) != 0;
+                Font runFont = GetOrCreateRunFont(cache, baseFont, run.Style, isCode);
+
+                float advanceWidth = MeasureAdvanceWidth(graphics, run.Text, runFont);
+                if (isCode)
                 {
-                    width += InlineCodeChipPadX;
-                    offsets[col] = width;
+                    width += advanceWidth + InlineCodeChipPadX * 2;
+                    continue;
+                }
+
+                if (i == runs.Count - 1)
+                {
+                    float inkWidth = MeasureInkWidth(graphics, run.Text, runFont);
+                    width += Math.Max(advanceWidth, inkWidth);
+                }
+                else
+                {
+                    width += advanceWidth;
                 }
             }
         }
@@ -1282,7 +1312,7 @@ public sealed class LayoutEngine
                 kv.Value.Dispose();
         }
 
-        return offsets;
+        return width;
     }
 
     private Font GetOrCreateRunFont(Dictionary<int, Font> cache, Font baseFont, InlineStyle style, bool isCode)
@@ -1330,14 +1360,90 @@ public sealed class LayoutEngine
         _ => LineFontRole.Base
     };
 
-    private static int MeasureWidth(string text, Font font)
+    private static int MeasureWidth(Graphics graphics, string text, Font font)
+        => (int)Math.Ceiling(MeasureAdvanceWidth(graphics, text, font));
+
+    private static float MeasureAdvanceWidth(Graphics graphics, string text, Font font)
     {
         if (string.IsNullOrEmpty(text)) return 0;
-        return TextRenderer.MeasureText(text, font, new Size(int.MaxValue, int.MaxValue), MeasureFlags).Width;
+
+        using StringFormat format = (StringFormat)MeasureStringFormat.Clone();
+        format.SetMeasurableCharacterRanges([new CharacterRange(0, text.Length)]);
+
+        Region[] regions = graphics.MeasureCharacterRanges(text, font, new RectangleF(0, 0, 10000, 1000), format);
+        try
+        {
+            RectangleF bounds = regions[0].GetBounds(graphics);
+            return bounds.Width;
+        }
+        finally
+        {
+            foreach (Region region in regions)
+                region.Dispose();
+        }
     }
 
-    private static int MeasureHeight(Font font)
-        => TextRenderer.MeasureText("Ag", font, new Size(int.MaxValue, int.MaxValue), MeasureFlags).Height;
+    private static float[] MeasurePrefixWidths(Graphics graphics, string text, Font font)
+    {
+        var offsets = new float[text.Length + 1];
+        if (text.Length == 0)
+            return offsets;
+
+        const int maxRangesPerBatch = 32;
+        float layoutHeight = Math.Max(64f, font.GetHeight(graphics) * 4f);
+        var layoutRect = new RectangleF(0, 0, 100000f, layoutHeight);
+
+        for (int batchStart = 1; batchStart <= text.Length; batchStart += maxRangesPerBatch)
+        {
+            int count = Math.Min(maxRangesPerBatch, text.Length - batchStart + 1);
+            var ranges = new CharacterRange[count];
+            for (int i = 0; i < count; i++)
+                ranges[i] = new CharacterRange(0, batchStart + i);
+
+            using StringFormat format = (StringFormat)MeasureStringFormat.Clone();
+            format.SetMeasurableCharacterRanges(ranges);
+
+            Region[] regions = graphics.MeasureCharacterRanges(text, font, layoutRect, format);
+            try
+            {
+                for (int i = 0; i < count; i++)
+                {
+                    int idx = batchStart + i;
+                    RectangleF bounds = regions[i].GetBounds(graphics);
+                    offsets[idx] = Math.Max(offsets[idx - 1], bounds.Width);
+                }
+            }
+            finally
+            {
+                foreach (Region region in regions)
+                    region.Dispose();
+            }
+        }
+
+        return offsets;
+    }
+
+    private static float MeasureInkWidth(Graphics graphics, string text, Font font)
+    {
+        if (string.IsNullOrEmpty(text))
+            return 0;
+
+        using var path = new GraphicsPath();
+        float emSize = font.SizeInPoints * graphics.DpiY / 72f;
+        path.AddString(
+            text,
+            font.FontFamily,
+            (int)font.Style,
+            emSize,
+            PointF.Empty,
+            StringFormat.GenericTypographic);
+
+        RectangleF bounds = path.GetBounds();
+        return bounds.Width;
+    }
+
+    private static int MeasureHeight(Graphics graphics, Font font)
+        => (int)Math.Ceiling(font.GetHeight(graphics));
 
     private static bool IsHorizontalRuleKind(MarkdownBlockKind kind)
         => kind == MarkdownBlockKind.HorizontalRule;
