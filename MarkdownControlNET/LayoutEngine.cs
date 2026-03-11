@@ -31,6 +31,10 @@ public sealed class LayoutLine
     // Already inline-parsed runs (without markdown markers)
     public required IReadOnlyList<InlineRun> InlineRuns { get; init; }
 
+    public bool IsImagePreview { get; init; }
+    public string ImageAltText { get; init; } = string.Empty;
+    public string ImageSource { get; init; } = string.Empty;
+
     // Task-list metadata
     public bool IsTaskListItem { get; init; }
     public bool IsTaskChecked { get; init; }
@@ -129,6 +133,7 @@ public sealed class LayoutEngine
     private Font _baseFont = SystemFonts.DefaultFont;
     private Font _boldFont = SystemFonts.DefaultFont;
     private Font _monoFont = SystemFonts.DefaultFont;
+    private Func<string, Size?>? _imageSizeProvider;
 
     private int _sourceLineCount;
 
@@ -155,6 +160,11 @@ public sealed class LayoutEngine
 
     private const int TableCodeChipPadX = 4;
     private const int InlineCodeChipPadX = 4;
+    private const int ImagePreviewMaxWidth = 720;
+    private const int ImagePreviewMaxHeight = 420;
+    private const int ImagePreviewPlaceholderWidth = 320;
+    private const int ImagePreviewPlaceholderHeight = 180;
+    private const int ImagePreviewPaddingY = 8;
 
     private int MeasureInlineRunsWidthForTableLayout(IReadOnlyList<InlineRun> runs, Font baseFont, Graphics graphics)
     {
@@ -167,6 +177,12 @@ public sealed class LayoutEngine
         {
             foreach (var run in runs)
             {
+                if (run.IsImage)
+                {
+                    width += InlineImageMetrics.CalculateSize(run.Source, _imageSizeProvider).Width;
+                    continue;
+                }
+
                 if (string.IsNullOrEmpty(run.Text)) continue;
 
                 bool isCode = (run.Style & InlineStyle.Code) != 0;
@@ -470,6 +486,7 @@ public sealed class LayoutEngine
         Font monoFont,
         float dpiX,
         float dpiY,
+        Func<string, Size?>? imageSizeProvider = null,
         IReadOnlySet<int>? forceRawTableStarts = null,
         IReadOnlySet<int>? forceRawCodeFenceStarts = null,
         IReadOnlySet<int>? forceRawLines = null,
@@ -480,6 +497,7 @@ public sealed class LayoutEngine
         _baseFont = baseFont;
         _boldFont = boldFont;
         _monoFont = monoFont;
+        _imageSizeProvider = imageSizeProvider;
 
         _lines.Clear();
         _lineBySource.Clear();
@@ -510,6 +528,10 @@ public sealed class LayoutEngine
             foreach (var it in lb.Items)
                 listItemByLine[it.SourceLine] = it;
         }
+
+        var imageByLine = doc.Blocks
+            .OfType<ImageBlock>()
+            .ToDictionary(block => block.StartLine);
 
         var tableStarts = new Dictionary<int, TableBlock>();
         foreach (var t in doc.Blocks.OfType<TableBlock>())
@@ -605,12 +627,15 @@ public sealed class LayoutEngine
                 sem.QuoteAdmonition != AdmonitionKind.None &&
                 sem.IsAdmonitionMarkerLine;
 
-            // Task metadata defaults for this line
-            bool isTaskListItem = false;
-            bool isTaskChecked = false;
-            int taskMarkerSourceStart = -1;
-            int taskMarkerSourceLength = 0;
-            int listContentSourceStart = -1;
+                // Task metadata defaults for this line
+                bool isTaskListItem = false;
+                bool isTaskChecked = false;
+                int taskMarkerSourceStart = -1;
+                int taskMarkerSourceLength = 0;
+                int listContentSourceStart = -1;
+                bool isImagePreview = false;
+                string imageAltText = string.Empty;
+                string imageSource = string.Empty;
 
             LineFontRole role = ResolveFontRole(sem.Kind);
             if (isAdmonitionMarkerLine && !forceRawThisLine)
@@ -689,6 +714,25 @@ public sealed class LayoutEngine
                     proj = VisualProjection.HidePrefix(source, source.Length);
                     runs = Array.Empty<InlineRun>();
                 }
+                else if (sem.Kind == MarkdownBlockKind.Image && imageByLine.TryGetValue(lineIdx, out var image))
+                {
+                    imageAltText = image.AltText;
+                    imageSource = image.Source;
+
+                    if (forceRawInlineThisLine)
+                    {
+                        proj = CreateIdentityProjection(source);
+                        runs = proj.DisplayText.Length == 0
+                            ? Array.Empty<InlineRun>()
+                            : new[] { new InlineRun(proj.DisplayText, InlineStyle.None) };
+                    }
+                    else
+                    {
+                        proj = VisualProjection.HidePrefix(source, source.Length);
+                        runs = Array.Empty<InlineRun>();
+                        isImagePreview = true;
+                    }
+                }
                 else if (sem.Kind == MarkdownBlockKind.List && listItemByLine.TryGetValue(lineIdx, out var li))
                 {
                     isTaskListItem = li.IsTask;
@@ -746,16 +790,28 @@ public sealed class LayoutEngine
                     }
                 }
 
-                int lineHeight = MeasureHeight(measurementGraphics, measureFont) + 4;
-                if (sem.Kind == MarkdownBlockKind.Heading)
-                    lineHeight += 2;
-                else if (isHorizontalRule && !forceRawThisLine)
-                    lineHeight = Math.Max(lineHeight, 14);
-
                 float[] visualOffsets = BuildVisualOffsets(proj.DisplayText, runs, measureFont, measurementGraphics);
-                int textWidth = (isHorizontalRule && !forceRawThisLine)
-                    ? Math.Max(1, viewport.Width - left - 12)
-                    : Math.Max(1, (int)Math.Ceiling(GetVisualWidth(visualOffsets)));
+                int lineHeight;
+                int textWidth;
+
+                if (isImagePreview)
+                {
+                    Size imageSize = CalculateImagePreviewSize(imageSource, viewport, left, imageSizeProvider);
+                    textWidth = Math.Max(1, imageSize.Width);
+                    lineHeight = Math.Max(1, imageSize.Height + (ImagePreviewPaddingY * 2));
+                }
+                else
+                {
+                    lineHeight = MeasureInlineRunsContentHeight(runs, measureFont, measurementGraphics) + 4;
+                    if (sem.Kind == MarkdownBlockKind.Heading)
+                        lineHeight += 2;
+                    else if (isHorizontalRule && !forceRawThisLine)
+                        lineHeight = Math.Max(lineHeight, 14);
+
+                    textWidth = (isHorizontalRule && !forceRawThisLine)
+                        ? Math.Max(1, viewport.Width - left - 12)
+                        : Math.Max(1, (int)Math.Ceiling(GetVisualWidth(visualOffsets)));
+                }
 
                 var line = new LayoutLine
                 {
@@ -770,6 +826,9 @@ public sealed class LayoutEngine
                     HeadingLevel = sem.HeadingLevel,
                     FontRole = role,
                     InlineRuns = runs,
+                    IsImagePreview = isImagePreview,
+                    ImageAltText = imageAltText,
+                    ImageSource = imageSource,
 
                     IsTaskListItem = isTaskListItem,
                     IsTaskChecked = isTaskChecked,
@@ -950,6 +1009,7 @@ public sealed class LayoutEngine
         var rects = new Rectangle[rows, cols];
         var texts = new string[rows, cols];
         var runs = new IReadOnlyList<InlineRun>[rows, cols];
+        int baseHeight = MeasureHeight(graphics, _baseFont) + cellPadY * 2;
 
         var alignments = new TableAlignment[cols];
         for (int c = 0; c < cols; c++)
@@ -958,6 +1018,9 @@ public sealed class LayoutEngine
                 ? block.Alignments[c]
                 : default;
         }
+
+        for (int r = 0; r < rows; r++)
+            rowHeights[r] = baseHeight;
 
         for (int c = 0; c < cols; c++)
         {
@@ -976,16 +1039,14 @@ public sealed class LayoutEngine
                 int contentW = parsed.Runs.Count > 0
                     ? MeasureInlineRunsWidthForTableLayout(parsed.Runs, measureFont, graphics)
                     : MeasureWidth(graphics, parsed.Text, measureFont);
+                int contentH = MeasureInlineRunsContentHeight(parsed.Runs, measureFont, graphics);
 
                 w = Math.Max(w, contentW + cellPadX * 2);
+                rowHeights[r] = Math.Max(rowHeights[r], contentH + cellPadY * 2);
             }
 
             colWidths[c] = w;
         }
-
-        int baseHeight = MeasureHeight(graphics, _baseFont) + cellPadY * 2;
-        for (int r = 0; r < rows; r++)
-            rowHeights[r] = baseHeight;
 
         int totalW = colWidths.Sum();
         int totalH = rowHeights.Sum();
@@ -1148,6 +1209,37 @@ public sealed class LayoutEngine
         return i;
     }
 
+    private static Size CalculateImagePreviewSize(
+        string imageSource,
+        Size viewport,
+        int left,
+        Func<string, Size?>? imageSizeProvider)
+    {
+        int availableWidth = Math.Max(120, viewport.Width - left - 24);
+        int maxWidth = Math.Max(120, Math.Min(ImagePreviewMaxWidth, availableWidth));
+
+        if (imageSizeProvider is not null && !string.IsNullOrWhiteSpace(imageSource))
+        {
+            Size? actual = imageSizeProvider(imageSource);
+            if (actual is { Width: > 0, Height: > 0 })
+            {
+                float scale = Math.Min(
+                    1f,
+                    Math.Min(
+                        maxWidth / (float)actual.Value.Width,
+                        ImagePreviewMaxHeight / (float)actual.Value.Height));
+
+                int width = Math.Max(1, (int)Math.Round(actual.Value.Width * scale));
+                int height = Math.Max(1, (int)Math.Round(actual.Value.Height * scale));
+                return new Size(width, height);
+            }
+        }
+
+        return new Size(
+            Math.Min(maxWidth, ImagePreviewPlaceholderWidth),
+            ImagePreviewPlaceholderHeight);
+    }
+
     private static int DistanceToY(Rectangle r, int y)
     {
         if (y < r.Top) return r.Top - y;
@@ -1210,6 +1302,21 @@ public sealed class LayoutEngine
         return (localX - left) <= (right - localX) ? idx - 1 : idx;
     }
 
+    private int MeasureInlineRunsContentHeight(IReadOnlyList<InlineRun> runs, Font baseFont, Graphics graphics)
+    {
+        int height = MeasureHeight(graphics, baseFont);
+
+        foreach (InlineRun run in runs)
+        {
+            if (!run.IsImage)
+                continue;
+
+            height = Math.Max(height, InlineImageMetrics.CalculateSize(run.Source, _imageSizeProvider).Height);
+        }
+
+        return height;
+    }
+
     private float[] BuildVisualOffsets(string displayText, IReadOnlyList<InlineRun> runs, Font baseFont, Graphics graphics)
     {
         int visualLength = displayText.Length;
@@ -1229,6 +1336,14 @@ public sealed class LayoutEngine
         {
             foreach (var run in runs)
             {
+                if (run.IsImage)
+                {
+                    col += Math.Max(1, run.VisualLength);
+                    offsets[col] = width + InlineImageMetrics.CalculateSize(run.Source, _imageSizeProvider).Width;
+                    width = offsets[col];
+                    continue;
+                }
+
                 if (string.IsNullOrEmpty(run.Text))
                     continue;
 
@@ -1282,6 +1397,13 @@ public sealed class LayoutEngine
             for (int i = 0; i < runs.Count; i++)
             {
                 InlineRun run = runs[i];
+
+                if (run.IsImage)
+                {
+                    width += InlineImageMetrics.CalculateSize(run.Source, _imageSizeProvider).Width;
+                    continue;
+                }
+
                 if (string.IsNullOrEmpty(run.Text))
                     continue;
 

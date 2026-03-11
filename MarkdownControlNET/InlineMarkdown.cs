@@ -15,7 +15,54 @@ public enum InlineStyle
     Code = 8
 }
 
-public readonly record struct InlineRun(string Text, InlineStyle Style);
+public enum InlineRunKind
+{
+    Text,
+    Image,
+    Link
+}
+
+public readonly record struct InlineRun
+{
+    private const string ImagePlaceholderText = "\uFFFC";
+
+    public InlineRun(string text, InlineStyle style)
+    {
+        Kind = InlineRunKind.Text;
+        Text = text ?? string.Empty;
+        Style = style;
+        AltText = string.Empty;
+        Source = string.Empty;
+        Href = string.Empty;
+    }
+
+    private InlineRun(InlineRunKind kind, string text, InlineStyle style, string altText, string source, string href)
+    {
+        Kind = kind;
+        Text = text ?? string.Empty;
+        Style = style;
+        AltText = altText ?? string.Empty;
+        Source = source ?? string.Empty;
+        Href = href ?? string.Empty;
+    }
+
+    public InlineRunKind Kind { get; }
+    public string Text { get; }
+    public InlineStyle Style { get; }
+    public string AltText { get; }
+    public string Source { get; }
+    public string Href { get; }
+
+    public bool IsImage => Kind == InlineRunKind.Image;
+    public bool IsLink => Kind == InlineRunKind.Link;
+    public int VisualLength => Text.Length;
+
+    public static InlineRun Image(string altText, string source, InlineStyle style)
+        => new(InlineRunKind.Image, ImagePlaceholderText, style, altText, source, string.Empty);
+
+    public static InlineRun Link(string text, string href, InlineStyle style)
+        => new(InlineRunKind.Link, text, style, string.Empty, string.Empty, href);
+}
 
 public sealed record InlineParseResult(
     string Text,
@@ -115,6 +162,68 @@ public static class InlineMarkdown
                 continue;
             }
 
+            if (TryReadImageSpan(input, i, out int imageEndExclusive, out string altText, out string imageSource))
+            {
+                FlushRun();
+
+                for (int s = i + 1; s < imageEndExclusive; s++)
+                    sourceToVisual[s] = outPos;
+
+                runs.Add(InlineRun.Image(altText, imageSource, style));
+                outPos++;
+                visualToSource.Add(imageEndExclusive);
+                sourceToVisual[imageEndExclusive] = outPos;
+
+                i = imageEndExclusive;
+                continue;
+            }
+
+            if (TryReadLinkSpan(
+                input,
+                i,
+                out int linkTextStart,
+                out int linkTextEnd,
+                out int linkEndExclusive,
+                out string linkText,
+                out string linkTarget))
+            {
+                FlushRun();
+
+                sourceToVisual[linkTextStart] = outPos;
+                runs.Add(InlineRun.Link(linkText, linkTarget, style));
+
+                for (int s = linkTextStart; s < linkTextEnd; s++)
+                {
+                    outPos++;
+                    visualToSource.Add(s + 1);
+                    sourceToVisual[s + 1] = outPos;
+                }
+
+                for (int s = linkTextEnd; s < linkEndExclusive; s++)
+                    sourceToVisual[s + 1] = outPos;
+
+                i = linkEndExclusive;
+                continue;
+            }
+
+            if (TryReadBareUrl(input, i, out int urlEndExclusive, out string bareUrl))
+            {
+                FlushRun();
+
+                string urlText = input[i..urlEndExclusive];
+                runs.Add(InlineRun.Link(urlText, bareUrl, style));
+
+                for (int s = i; s < urlEndExclusive; s++)
+                {
+                    outPos++;
+                    visualToSource.Add(s + 1);
+                    sourceToVisual[s + 1] = outPos;
+                }
+
+                i = urlEndExclusive;
+                continue;
+            }
+
             // Marker handling (open/close)
             if (TryReadMarker(input, i, style, out int markerLen, out InlineStyle toggleStyle))
             {
@@ -192,7 +301,115 @@ public static class InlineMarkdown
             : current | toggle;
 
     private static bool IsEscapable(char c)
-        => c is '*' or '_' or '~' or '\\' or '`';
+        => c is '*' or '_' or '~' or '\\' or '`' or '!' or '[' or ']' or '(' or ')';
+
+    private static bool TryReadImageSpan(
+        string s,
+        int i,
+        out int endExclusive,
+        out string altText,
+        out string source)
+    {
+        endExclusive = -1;
+        altText = string.Empty;
+        source = string.Empty;
+
+        if (i < 0 || i + 4 >= s.Length)
+            return false;
+
+        if (s[i] != '!' || s[i + 1] != '[')
+            return false;
+
+        if (IsEscapedAt(s, i))
+            return false;
+
+        int altEnd = FindUnescapedChar(s, ']', i + 2);
+        if (altEnd < 0 || altEnd + 1 >= s.Length || s[altEnd + 1] != '(')
+            return false;
+
+        int sourceStart = altEnd + 2;
+        int sourceEnd = FindImageSourceEnd(s, sourceStart);
+        if (sourceEnd < 0)
+            return false;
+
+        string rawSource = s[sourceStart..sourceEnd].Trim();
+        if (rawSource.Length >= 2 && rawSource[0] == '<' && rawSource[^1] == '>')
+            rawSource = rawSource[1..^1].Trim();
+
+        if (string.IsNullOrEmpty(rawSource))
+            return false;
+
+        altText = s[(i + 2)..altEnd];
+        source = rawSource;
+        endExclusive = sourceEnd + 1;
+        return true;
+    }
+
+    private static bool TryReadLinkSpan(
+        string s,
+        int i,
+        out int textStart,
+        out int textEnd,
+        out int endExclusive,
+        out string linkText,
+        out string linkTarget)
+    {
+        textStart = -1;
+        textEnd = -1;
+        endExclusive = -1;
+        linkText = string.Empty;
+        linkTarget = string.Empty;
+
+        if (i < 0 || i + 4 >= s.Length || s[i] != '[')
+            return false;
+
+        if (IsEscapedAt(s, i))
+            return false;
+
+        int closeBracket = FindUnescapedChar(s, ']', i + 1);
+        if (closeBracket < 0 || closeBracket + 1 >= s.Length || s[closeBracket + 1] != '(')
+            return false;
+
+        int targetStart = closeBracket + 2;
+        int targetEnd = FindImageSourceEnd(s, targetStart);
+        if (targetEnd < 0)
+            return false;
+
+        string rawTarget = s[targetStart..targetEnd].Trim();
+        if (rawTarget.Length >= 2 && rawTarget[0] == '<' && rawTarget[^1] == '>')
+            rawTarget = rawTarget[1..^1].Trim();
+
+        linkText = s[(i + 1)..closeBracket];
+        if (string.IsNullOrEmpty(linkText) || string.IsNullOrEmpty(rawTarget))
+            return false;
+
+        textStart = i + 1;
+        textEnd = closeBracket;
+        endExclusive = targetEnd + 1;
+        linkTarget = rawTarget;
+        return true;
+    }
+
+    private static bool TryReadBareUrl(string s, int i, out int endExclusive, out string href)
+    {
+        endExclusive = -1;
+        href = string.Empty;
+
+        if (!StartsWithHttpScheme(s, i) || !CanStartBareUrl(s, i))
+            return false;
+
+        int end = i;
+        while (end < s.Length && !char.IsWhiteSpace(s[end]) && s[end] is not '<' and not '>')
+            end++;
+
+        end = TrimBareUrlEnd(s, i, end);
+        if (end <= i)
+            return false;
+
+        href = s[i..end];
+        endExclusive = end;
+        return true;
+    }
 
     private static bool TryReadCodeSpan(string s, int i, out int markerLen, out int closeMarkerPos)
     {
@@ -388,6 +605,122 @@ public static class InlineMarkdown
 
     private static bool HasStyle(InlineStyle current, InlineStyle needed)
         => (current & needed) == needed;
+
+    private static bool StartsWithHttpScheme(string text, int index)
+    {
+        ReadOnlySpan<char> remaining = text.AsSpan(index);
+        return remaining.StartsWith("http://".AsSpan(), StringComparison.OrdinalIgnoreCase) ||
+               remaining.StartsWith("https://".AsSpan(), StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool CanStartBareUrl(string text, int index)
+    {
+        if (index <= 0)
+            return true;
+
+        char previous = text[index - 1];
+        return char.IsWhiteSpace(previous) || previous is '(' or '[' or '<' or '"' or '\'' or ':';
+    }
+
+    private static int TrimBareUrlEnd(string text, int start, int end)
+    {
+        while (end > start)
+        {
+            char last = text[end - 1];
+            if (last is '.' or ',' or ';' or ':' or '!' or '?')
+            {
+                end--;
+                continue;
+            }
+
+            if (last == ')' && HasMoreClosingParens(text, start, end))
+            {
+                end--;
+                continue;
+            }
+
+            break;
+        }
+
+        return end;
+    }
+
+    private static int FindUnescapedChar(string text, char ch, int startIndex)
+    {
+        for (int i = Math.Max(0, startIndex); i < text.Length; i++)
+        {
+            if (text[i] != ch)
+                continue;
+
+            if (!IsEscapedAt(text, i))
+                return i;
+        }
+
+        return -1;
+    }
+
+    private static bool HasMoreClosingParens(string text, int start, int end)
+    {
+        int opens = 0;
+        int closes = 0;
+
+        for (int i = start; i < end; i++)
+        {
+            if (text[i] == '(')
+                opens++;
+            else if (text[i] == ')')
+                closes++;
+        }
+
+        return closes > opens;
+    }
+
+    private static int FindImageSourceEnd(string text, int startIndex)
+    {
+        bool inAngle = false;
+        int depth = 0;
+
+        for (int i = Math.Max(0, startIndex); i < text.Length; i++)
+        {
+            char ch = text[i];
+
+            if (ch == '\\' && i + 1 < text.Length)
+            {
+                i++;
+                continue;
+            }
+
+            if (!inAngle && ch == '<' && depth == 0)
+            {
+                inAngle = true;
+                continue;
+            }
+
+            if (inAngle)
+            {
+                if (ch == '>')
+                    inAngle = false;
+
+                continue;
+            }
+
+            if (ch == '(')
+            {
+                depth++;
+                continue;
+            }
+
+            if (ch != ')')
+                continue;
+
+            if (depth == 0)
+                return i;
+
+            depth--;
+        }
+
+        return -1;
+    }
 
     private static int CountRun(string s, int start, char ch)
     {

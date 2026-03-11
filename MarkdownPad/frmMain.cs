@@ -1,4 +1,5 @@
 using System.Drawing.Printing;
+using System.Diagnostics;
 using MarkdownGdi;
 
 namespace MarkdownPad;
@@ -84,6 +85,8 @@ public partial class frmMain : Form
         selectAllToolStripMenuItem.Click += (_, _) => ExecuteOnActiveEditor(editor => editor.SelectAllCommand());
 
         tableDesignerToolStripMenuItem.Click += (_, _) => ShowTableDesigner();
+        insertLinkToolStripMenuItem.Click += (_, _) => ShowInsertLinkDialog();
+        insertImageToolStripMenuItem.Click += (_, _) => ShowInsertImageDialog();
         heading1ToolStripMenuItem.Click += (_, _) => ApplyHeading(1);
         heading2ToolStripMenuItem.Click += (_, _) => ApplyHeading(2);
         heading3ToolStripMenuItem.Click += (_, _) => ApplyHeading(3);
@@ -109,6 +112,8 @@ public partial class frmMain : Form
         redoToolStripButton.Click += (_, _) => ExecuteOnActiveEditor(editor => editor.RedoCommand());
         findToolStripButton.Click += (_, _) => ShowFindDialog();
         findNextToolStripButton.Click += (_, _) => FindNextInActiveDocument();
+        linkToolStripButton.Click += (_, _) => ShowInsertLinkDialog();
+        imageToolStripButton.Click += (_, _) => ShowInsertImageDialog();
         tableToolStripButton.Click += (_, _) => ShowTableDesigner();
         heading1ToolStripDropDownItem.Click += (_, _) => ApplyHeading(1);
         heading2ToolStripDropDownItem.Click += (_, _) => ApplyHeading(2);
@@ -167,6 +172,7 @@ public partial class frmMain : Form
 
         tab.Editor.MarkdownChanged += Editor_MarkdownChanged;
         tab.Editor.FindRequested += Editor_FindRequested;
+        tab.Editor.LinkActivated += Editor_LinkActivated;
         tab.Editor.Enter += Editor_StateAffectingEvent;
         tab.Editor.GotFocus += Editor_StateAffectingEvent;
         tab.Editor.KeyUp += Editor_StateAffectingEvent;
@@ -196,7 +202,7 @@ public partial class frmMain : Form
         OpenDocumentsFromPaths(openFileDialog.FileNames);
     }
 
-    private void OpenDocumentsFromPaths(IEnumerable<string> filePaths)
+    private padTab? OpenDocumentsFromPaths(IEnumerable<string> filePaths)
     {
         padTab? selectedTab = null;
         padTab? reusableTab = GetReusableBlankTab();
@@ -251,6 +257,7 @@ public partial class frmMain : Form
         }
 
         UpdateUiState();
+        return selectedTab;
     }
 
     private bool SaveActiveDocument(bool forceSaveAs = false)
@@ -355,6 +362,7 @@ public partial class frmMain : Form
 
         tab.Editor.MarkdownChanged -= Editor_MarkdownChanged;
         tab.Editor.FindRequested -= Editor_FindRequested;
+        tab.Editor.LinkActivated -= Editor_LinkActivated;
         tab.Editor.Enter -= Editor_StateAffectingEvent;
         tab.Editor.GotFocus -= Editor_StateAffectingEvent;
         tab.Editor.KeyUp -= Editor_StateAffectingEvent;
@@ -443,6 +451,39 @@ public partial class frmMain : Form
         editor.InsertTableCommand(dialog.GeneratedMarkdown);
         FocusEditor(tab);
         SetStatusMessage("Table inserted");
+        UpdateUiState();
+    }
+
+    private void ShowInsertLinkDialog()
+    {
+        ShowInsertMediaDialog(InsertMediaKind.Link);
+    }
+
+    private void ShowInsertImageDialog()
+    {
+        ShowInsertMediaDialog(InsertMediaKind.Image);
+    }
+
+    private void ShowInsertMediaDialog(InsertMediaKind kind)
+    {
+        padTab? tab = ActiveTab;
+        if (tab is null)
+            return;
+
+        MarkdownGdiEditor editor = tab.Editor;
+        string initialTitle = BuildInitialDialogTitle(editor.SelectedText);
+
+        using var dialog = new InsertMediaDialog(
+            kind,
+            documentBasePath: tab.FilePath is null ? null : Path.GetDirectoryName(tab.FilePath),
+            initialTitle: initialTitle);
+
+        if (dialog.ShowDialog(this) != DialogResult.OK)
+            return;
+
+        editor.InsertMarkdownSnippetCommand(dialog.GeneratedMarkdown);
+        FocusEditor(tab);
+        SetStatusMessage(kind == InsertMediaKind.Link ? "Link inserted" : "Image inserted");
         UpdateUiState();
     }
 
@@ -680,6 +721,8 @@ public partial class frmMain : Form
         pasteToolStripMenuItem.Enabled = hasEditor && editor!.CanPaste;
         selectAllToolStripMenuItem.Enabled = hasEditor && editor!.CanSelectAll;
         formatToolStripMenuItem.Enabled = hasEditor;
+        insertLinkToolStripMenuItem.Enabled = hasEditor;
+        insertImageToolStripMenuItem.Enabled = hasEditor;
         tableDesignerToolStripMenuItem.Enabled = hasEditor;
         headingToolStripMenuItem.Enabled = hasEditor;
         quoteToolStripMenuItem.Enabled = hasEditor;
@@ -696,6 +739,8 @@ public partial class frmMain : Form
         redoToolStripButton.Enabled = hasEditor && editor!.CanRedo;
         findToolStripButton.Enabled = hasEditor;
         findNextToolStripButton.Enabled = hasEditor && editor!.CanFindNext;
+        linkToolStripButton.Enabled = hasEditor;
+        imageToolStripButton.Enabled = hasEditor;
         tableToolStripButton.Enabled = hasEditor;
         headingToolStripDropDownButton.Enabled = hasEditor;
         quoteToolStripButton.Enabled = hasEditor;
@@ -798,6 +843,16 @@ public partial class frmMain : Form
         };
     }
 
+    private static string BuildInitialDialogTitle(string? selectedText)
+    {
+        string normalized = (selectedText ?? string.Empty)
+            .Replace("\r\n", " ", StringComparison.Ordinal)
+            .Replace('\n', ' ')
+            .Trim();
+
+        return normalized.Length > 120 ? normalized[..120].TrimEnd() : normalized;
+    }
+
     private void SelectAdjacentTab(int offset)
     {
         if (tabControl1.TabCount <= 1)
@@ -847,6 +902,128 @@ public partial class frmMain : Form
             tabControl1.SelectedTab = tab;
 
         ShowFindDialog(e.CurrentQuery, e.CurrentOptions);
+    }
+
+    private void Editor_LinkActivated(object? sender, LinkActivatedEventArgs e)
+    {
+        if (sender is not MarkdownGdiEditor editor)
+            return;
+
+        padTab? tab = FindTabByEditor(editor);
+        if (tab is not null)
+            tabControl1.SelectedTab = tab;
+
+        try
+        {
+            if (e.IsMarkdownDocument)
+            {
+                HandleMarkdownLink(tab, e);
+                return;
+            }
+
+            if (e.IsWebLink)
+            {
+                Process.Start(new ProcessStartInfo
+                {
+                    FileName = e.ResolvedTarget,
+                    UseShellExecute = true
+                });
+
+                SetStatusMessage($"Opened link: {e.ResolvedTarget}");
+                return;
+            }
+
+            if (!File.Exists(e.ResolvedTarget))
+            {
+                MessageBox.Show(
+                    this,
+                    $"The linked file could not be found:\n{e.ResolvedTarget}",
+                    "Open Link",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning);
+                return;
+            }
+
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = e.ResolvedTarget,
+                UseShellExecute = true
+            });
+
+            SetStatusMessage($"Opened link: {Path.GetFileName(e.ResolvedTarget)}");
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(
+                this,
+                $"The link could not be opened:\n{e.Target}\n\n{ex.Message}",
+                "Open Link",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Error);
+        }
+    }
+
+    private void HandleMarkdownLink(padTab? sourceTab, LinkActivatedEventArgs e)
+    {
+        padTab? targetTab = ResolveMarkdownLinkTargetTab(sourceTab, e);
+        if (targetTab is null)
+            return;
+
+        tabControl1.SelectedTab = targetTab;
+        FocusEditor(targetTab);
+
+        if (e.HasFragment)
+        {
+            if (!targetTab.Editor.NavigateToHeadingAnchor(e.Fragment))
+            {
+                MessageBox.Show(
+                    this,
+                    $"The target heading could not be found:\n{e.Fragment}",
+                    "Open Link",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning);
+                return;
+            }
+
+            string statusTarget = !string.IsNullOrWhiteSpace(targetTab.FilePath)
+                ? Path.GetFileName(targetTab.FilePath)
+                : targetTab.DocumentName;
+
+            SetStatusMessage($"Jumped to {e.Fragment} in {statusTarget}");
+            return;
+        }
+
+        string documentLabel = !string.IsNullOrWhiteSpace(targetTab.FilePath)
+            ? Path.GetFileName(targetTab.FilePath)
+            : targetTab.DocumentName;
+
+        SetStatusMessage($"Opened link: {documentLabel}");
+    }
+
+    private padTab? ResolveMarkdownLinkTargetTab(padTab? sourceTab, LinkActivatedEventArgs e)
+    {
+        if (e.IsCurrentDocument || string.IsNullOrWhiteSpace(e.ResolvedTarget))
+            return sourceTab;
+
+        if (sourceTab is not null &&
+            !string.IsNullOrWhiteSpace(sourceTab.FilePath) &&
+            string.Equals(sourceTab.FilePath, e.ResolvedTarget, StringComparison.OrdinalIgnoreCase))
+        {
+            return sourceTab;
+        }
+
+        if (!File.Exists(e.ResolvedTarget))
+        {
+            MessageBox.Show(
+                this,
+                $"The linked Markdown document could not be found:\n{e.ResolvedTarget}",
+                "Open Link",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Warning);
+            return null;
+        }
+
+        return OpenDocumentsFromPaths([e.ResolvedTarget]);
     }
 
     private void Editor_StateAffectingEvent(object? sender, EventArgs e)

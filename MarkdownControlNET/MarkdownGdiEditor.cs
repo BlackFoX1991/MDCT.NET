@@ -1,5 +1,6 @@
 ﻿using System.ComponentModel;
 using System.Diagnostics.CodeAnalysis;
+using System.Drawing.Drawing2D;
 using System.Drawing.Design;
 using System.Linq;
 using System.Text;
@@ -14,6 +15,11 @@ namespace MarkdownGdi;
 public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
 {
     // ... deine bestehenden Felder ...
+
+    private static readonly HttpClient ImageHttpClient = new()
+    {
+        Timeout = TimeSpan.FromSeconds(15)
+    };
 
     private bool _isInitializing;
     private bool _pendingInitialRefresh = true;
@@ -34,6 +40,8 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
     // Tables can be displayed non-destructively as raw source
     private readonly HashSet<int> _rawTableStartLines = new();
     private readonly Dictionary<int, Font> _headingFontCache = new();
+    private readonly Dictionary<string, ImageCacheEntry> _imageCache = new(StringComparer.OrdinalIgnoreCase);
+    private readonly object _imageCacheSync = new();
 
     private readonly List<UndoRecord> _undo = new();
     private readonly List<UndoRecord> _redo = new();
@@ -272,6 +280,25 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
     private Color _tableDraftHint = Color.DarkGoldenrod;
     private Color _cellEditorBack = Color.White;
     private Color _cellEditorFore = Color.Black;
+    private Color _linkColor = Color.FromArgb(9, 105, 218);
+    private Color _imagePlaceholderBack = Color.FromArgb(248, 249, 251);
+    private Color _imagePlaceholderBorder = Color.FromArgb(214, 220, 228);
+    private Color _imagePlaceholderText = Color.FromArgb(92, 101, 112);
+    private string? _documentBasePath;
+
+    private const int ImagePreviewPaddingY = 8;
+    private const int SvgRasterMaxWidth = 1600;
+    private const int SvgRasterMaxHeight = 1600;
+
+    private sealed class ImageCacheEntry
+    {
+        public Image? Image { get; set; }
+        public bool IsLoading { get; set; }
+        public string? Error { get; set; }
+        public string DisplaySource { get; init; } = string.Empty;
+    }
+
+    private readonly record struct LinkHit(string DisplayText, string Target);
 
 
     [Category("Appearance")]
@@ -361,6 +388,33 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
     [Browsable(false)]
     public bool IsDarkTheme => _isDarkThemeEffective;
 
+    [Browsable(false)]
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public string? DocumentBasePath
+    {
+        get => _documentBasePath;
+        set
+        {
+            string? normalized = string.IsNullOrWhiteSpace(value)
+                ? null
+                : Path.GetFullPath(value);
+
+            if (string.Equals(_documentBasePath, normalized, StringComparison.OrdinalIgnoreCase))
+                return;
+
+            _documentBasePath = normalized;
+            ClearImageCache();
+
+            if (!IsHandleCreated)
+                return;
+
+            InvalidateLayoutContext();
+            RefreshLayoutForCaretContext(force: true);
+            RepositionCellEditor();
+            Invalidate();
+        }
+    }
+
 
     private bool ResolveEffectiveDarkMode()
     {
@@ -406,6 +460,10 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
 
         _cellEditorBack = Color.White;
         _cellEditorFore = Color.Black;
+        _linkColor = Color.FromArgb(9, 105, 218);
+        _imagePlaceholderBack = Color.FromArgb(248, 249, 251);
+        _imagePlaceholderBorder = Color.FromArgb(214, 220, 228);
+        _imagePlaceholderText = Color.FromArgb(92, 101, 112);
     }
 
     private void ApplyDarkPaletteCore()
@@ -430,6 +488,10 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
 
         _cellEditorBack = Color.FromArgb(43, 47, 56);
         _cellEditorFore = ForeColor;
+        _linkColor = Color.FromArgb(124, 184, 255);
+        _imagePlaceholderBack = Color.FromArgb(39, 43, 50);
+        _imagePlaceholderBorder = Color.FromArgb(82, 88, 99);
+        _imagePlaceholderText = Color.FromArgb(185, 192, 203);
     }
 
     private void EnsureSystemThemeSync()
@@ -620,6 +682,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
 
     // NEW: Host-UI kann darauf reagieren und eigenen Find-Dialog anzeigen
     public event EventHandler<FindRequestedEventArgs>? FindRequested;
+    public event EventHandler<LinkActivatedEventArgs>? LinkActivated;
 
 
     [Browsable(false)]
@@ -648,6 +711,11 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
 
     [Browsable(false)]
     public bool HasSelection => _cellEditor is not null ? _cellEditor.SelectionLength > 0 : _state.HasSelection;
+
+    [Browsable(false)]
+    public string SelectedText => _cellEditor is not null
+        ? _cellEditor.SelectedText
+        : _state.GetSelectedText(_doc);
 
     public void SelectAllCommand()
     {
@@ -708,6 +776,37 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
             return;
 
         ApplyDocumentEdit(() => _state.InsertText(_doc, text));
+    }
+
+    public void InsertMarkdownSnippetCommand(string markdown)
+    {
+        string normalized = markdown ?? string.Empty;
+        if (string.IsNullOrEmpty(normalized))
+            return;
+
+        if (_cellEditor is not null)
+        {
+            _cellEditor.SelectedText = normalized;
+            return;
+        }
+
+        ApplyDocumentEdit(() => _state.InsertText(_doc, normalized));
+    }
+
+    public bool NavigateToHeadingAnchor(string anchor)
+    {
+        if (!TryFindHeadingForAnchor(anchor, out HeadingBlock heading))
+            return false;
+
+        string sourceLine = _doc.GetLine(heading.Line);
+        int targetColumn = Math.Clamp(GetHeadingMarkerLength(sourceLine), 0, sourceLine.Length);
+
+        _state.SetCaret(new MarkdownPosition(heading.Line, targetColumn), shift: false, _doc);
+        RefreshLayoutForCaretContext(force: true);
+        ResetCaretBlink();
+        EnsureCaretVisible();
+        Invalidate();
+        return true;
     }
 
     /// <summary>
@@ -1017,6 +1116,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
             _boldFont.Dispose();
             _monoFont.Dispose();
             ClearHeadingFontCache();
+            ClearImageCache();
             _cellEditor?.Dispose();
         }
 
@@ -1147,15 +1247,21 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         Focus();
         Point content = ClientToContent(e.Location);
 
+        if (_cellEditor is not null)
+            EndCellEdit(discard: false, move: CellMove.None);
+
+        if (TryActivateLinkAtPoint(content))
+        {
+            _mouseSelecting = false;
+            return;
+        }
+
         if (_layout.TryHitTestTableCell(content, out var th))
         {
             _mouseSelecting = false;
             BeginTableCellEdit(th.Table, th.Row, th.Col);
             return;
         }
-
-        if (_cellEditor is not null)
-            EndCellEdit(discard: false, move: CellMove.None);
 
         // Task checkbox toggle (☐ / ☑) by click
         if (TryToggleTaskCheckboxAtPoint(content))
@@ -1184,7 +1290,9 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         if (_cellEditor is null && !_mouseSelecting)
         {
             Point content = ClientToContent(e.Location);
-            Cursor = IsPointOverTaskCheckbox(content) ? Cursors.Hand : Cursors.IBeam;
+            Cursor = IsPointOverTaskCheckbox(content) || IsPointOverImagePreview(content) || IsPointOverLink(content)
+                ? Cursors.Hand
+                : Cursors.IBeam;
         }
 
         if (!_mouseSelecting) return;
@@ -1224,6 +1332,344 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
     private bool IsPointOverTaskCheckbox(Point contentPoint)
     {
         return TryBuildTaskCheckboxHit(contentPoint, out _, out _);
+    }
+
+    private bool IsPointOverImagePreview(Point contentPoint)
+    {
+        var pos = _layout.HitTestText(contentPoint);
+        LayoutLine? line = _layout.GetLine(pos.Line);
+        if (line is null || !line.IsImagePreview)
+            return false;
+
+        return GetImagePreviewRect(line).Contains(contentPoint);
+    }
+
+    private bool IsPointOverLink(Point contentPoint)
+        => TryBuildLinkHit(contentPoint, out _);
+
+    private bool TryActivateLinkAtPoint(Point contentPoint)
+    {
+        if (LinkActivated is null || !TryBuildLinkActivation(contentPoint, out LinkActivatedEventArgs args))
+            return false;
+
+        LinkActivated.Invoke(this, args);
+        return true;
+    }
+
+    private bool TryBuildLinkActivation(Point contentPoint, out LinkActivatedEventArgs args)
+    {
+        args = null!;
+
+        if (!TryBuildLinkHit(contentPoint, out LinkHit hit))
+            return false;
+
+        if (!TryResolveLinkTarget(
+            hit.Target,
+            out string resolvedTarget,
+            out string fragment,
+            out bool isWebLink,
+            out bool isMarkdownDocument,
+            out bool isCurrentDocument))
+        {
+            return false;
+        }
+
+        args = new LinkActivatedEventArgs(
+            hit.DisplayText,
+            hit.Target,
+            resolvedTarget,
+            fragment,
+            isWebLink,
+            isMarkdownDocument,
+            isCurrentDocument);
+        return true;
+    }
+
+    private bool TryResolveLinkTarget(
+        string target,
+        out string resolvedTarget,
+        out string fragment,
+        out bool isWebLink,
+        out bool isMarkdownDocument,
+        out bool isCurrentDocument)
+    {
+        resolvedTarget = string.Empty;
+        fragment = string.Empty;
+        isWebLink = false;
+        isMarkdownDocument = false;
+        isCurrentDocument = false;
+
+        string raw = (target ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(raw))
+            return false;
+
+        if (Uri.TryCreate(raw, UriKind.Absolute, out Uri? absoluteUri))
+        {
+            if (string.Equals(absoluteUri.Scheme, Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(absoluteUri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase))
+            {
+                resolvedTarget = absoluteUri.AbsoluteUri;
+                isWebLink = true;
+                return true;
+            }
+
+            if (absoluteUri.IsFile)
+            {
+                resolvedTarget = Path.GetFullPath(absoluteUri.LocalPath);
+                fragment = absoluteUri.Fragment;
+                isMarkdownDocument = IsMarkdownDocumentPath(resolvedTarget);
+                return true;
+            }
+        }
+
+        int fragmentIndex = raw.IndexOf('#');
+        string rawPath = fragmentIndex >= 0 ? raw[..fragmentIndex] : raw;
+        fragment = fragmentIndex >= 0 ? raw[fragmentIndex..] : string.Empty;
+
+        if (string.IsNullOrWhiteSpace(rawPath))
+        {
+            if (string.IsNullOrWhiteSpace(fragment))
+                return false;
+
+            isMarkdownDocument = true;
+            isCurrentDocument = true;
+            return true;
+        }
+
+        string basePath = _documentBasePath ?? Environment.CurrentDirectory;
+        string combined = Path.IsPathRooted(rawPath)
+            ? rawPath
+            : Path.Combine(basePath, rawPath);
+
+        resolvedTarget = Path.GetFullPath(combined);
+        isMarkdownDocument = IsMarkdownDocumentPath(resolvedTarget);
+        return true;
+    }
+
+    private static bool IsMarkdownDocumentPath(string path)
+        => string.Equals(Path.GetExtension(path), ".md", StringComparison.OrdinalIgnoreCase);
+
+    private bool TryFindHeadingForAnchor(string anchor, out HeadingBlock heading)
+    {
+        heading = null!;
+
+        if (!TryParseHeadingAnchor(anchor, out int? requestedLevel, out string lookupText, out string lookupSlug))
+            return false;
+
+        var slugCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (HeadingBlock candidate in _doc.Blocks.OfType<HeadingBlock>())
+        {
+            string baseSlug = NormalizeHeadingAnchorSlug(candidate.Text);
+            if (string.IsNullOrEmpty(baseSlug))
+                continue;
+
+            int occurrence = slugCounts.TryGetValue(baseSlug, out int seen) ? seen + 1 : 0;
+            slugCounts[baseSlug] = occurrence;
+
+            string effectiveSlug = occurrence == 0 ? baseSlug : $"{baseSlug}-{occurrence}";
+            if (requestedLevel.HasValue && candidate.Level != requestedLevel.Value)
+                continue;
+
+            string candidateText = NormalizeHeadingAnchorText(candidate.Text);
+            if (string.Equals(candidateText, lookupText, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(baseSlug, lookupSlug, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(effectiveSlug, lookupSlug, StringComparison.OrdinalIgnoreCase))
+            {
+                heading = candidate;
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool TryParseHeadingAnchor(
+        string anchor,
+        out int? requestedLevel,
+        out string lookupText,
+        out string lookupSlug)
+    {
+        requestedLevel = null;
+        lookupText = string.Empty;
+        lookupSlug = string.Empty;
+
+        string raw = (anchor ?? string.Empty).Trim();
+        if (string.IsNullOrEmpty(raw))
+            return false;
+
+        if (raw[0] == '#')
+        {
+            int hashCount = 0;
+            while (hashCount < raw.Length && raw[hashCount] == '#')
+                hashCount++;
+
+            requestedLevel = hashCount;
+            raw = raw[hashCount..];
+        }
+
+        raw = raw.Trim();
+        if (string.IsNullOrEmpty(raw))
+            return false;
+
+        lookupText = NormalizeHeadingAnchorText(raw);
+        lookupSlug = NormalizeHeadingAnchorSlug(raw);
+        return lookupText.Length > 0 || lookupSlug.Length > 0;
+    }
+
+    private static string NormalizeHeadingAnchorText(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return string.Empty;
+
+        var sb = new StringBuilder(value.Length);
+        bool pendingSeparator = false;
+
+        foreach (char ch in value.Trim())
+        {
+            if (char.IsLetterOrDigit(ch))
+            {
+                if (pendingSeparator && sb.Length > 0)
+                    sb.Append(' ');
+
+                sb.Append(char.ToLowerInvariant(ch));
+                pendingSeparator = false;
+                continue;
+            }
+
+            if (char.IsWhiteSpace(ch) || ch is '-' or '_' or '.')
+                pendingSeparator = sb.Length > 0;
+        }
+
+        return sb.ToString();
+    }
+
+    private static string NormalizeHeadingAnchorSlug(string value)
+        => NormalizeHeadingAnchorText(value).Replace(' ', '-');
+
+    private bool TryBuildLinkHit(Point contentPoint, out LinkHit hit)
+    {
+        return TryBuildTableLinkHit(contentPoint, out hit) ||
+               TryBuildLineLinkHit(contentPoint, out hit);
+    }
+
+    private bool TryBuildTableLinkHit(Point contentPoint, out LinkHit hit)
+    {
+        hit = default;
+
+        if (!_layout.TryHitTestTableCell(contentPoint, out TableHit tableHit))
+            return false;
+
+        if (_rawTableStartLines.Contains(tableHit.Table.StartLine))
+            return false;
+
+        IReadOnlyList<InlineRun> runs = tableHit.Table.GetCellRuns(tableHit.Row, tableHit.Col);
+        if (runs.Count == 0)
+            return false;
+
+        using var bmp = new Bitmap(1, 1);
+        bmp.SetResolution(Math.Max(1f, DeviceDpi), Math.Max(1f, DeviceDpi));
+        using var g = Graphics.FromImage(bmp);
+        g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+
+        Rectangle rect = tableHit.Table.GetCellRect(tableHit.Row, tableHit.Col);
+        Rectangle textRect = Rectangle.Inflate(rect, -8, -5);
+        Font baseFont = tableHit.Row == 0 ? _boldFont : Font;
+
+        int textWidth = MeasureInlineRunsWidthForTable(g, runs, baseFont);
+        int x = textRect.Left;
+        string align = tableHit.Table.GetColumnAlignment(tableHit.Col).ToString();
+
+        if (align.Equals("Center", StringComparison.OrdinalIgnoreCase))
+            x = textRect.Left + Math.Max(0, (textRect.Width - textWidth) / 2);
+        else if (align.Equals("Right", StringComparison.OrdinalIgnoreCase))
+            x = textRect.Right - textWidth;
+
+        x = Math.Max(textRect.Left, x);
+        return TryHitLinkRun(contentPoint, runs, baseFont, x, textRect.Top, textRect.Height, out hit);
+    }
+
+    private bool TryBuildLineLinkHit(Point contentPoint, out LinkHit hit)
+    {
+        hit = default;
+
+        MarkdownPosition pos = _layout.HitTestText(contentPoint);
+        LayoutLine? line = _layout.GetLine(pos.Line);
+        if (line is null || line.IsImagePreview)
+            return false;
+
+        if (contentPoint.Y < line.Bounds.Top || contentPoint.Y > line.Bounds.Bottom)
+            return false;
+
+        return TryHitLinkRun(
+            contentPoint,
+            line.InlineRuns,
+            GetRenderFont(line),
+            line.TextX,
+            line.Bounds.Top,
+            line.Bounds.Height,
+            out hit);
+    }
+
+    private bool TryHitLinkRun(
+        Point contentPoint,
+        IReadOnlyList<InlineRun> runs,
+        Font baseFont,
+        int startX,
+        int top,
+        int height,
+        out LinkHit hit)
+    {
+        hit = default;
+        if (runs.Count == 0)
+            return false;
+
+        int x = startX;
+        var cache = new Dictionary<int, Font>();
+
+        try
+        {
+            foreach (InlineRun run in runs)
+            {
+                int runWidth = MeasureInlineRunWidth(run, baseFont, cache);
+                if (run.IsLink && runWidth > 0)
+                {
+                    Rectangle hitRect = new(x, top, runWidth, Math.Max(1, height));
+                    if (hitRect.Contains(contentPoint))
+                    {
+                        hit = new LinkHit(run.Text, run.Href);
+                        return true;
+                    }
+                }
+
+                x += runWidth;
+            }
+        }
+        finally
+        {
+            foreach (Font font in cache.Values)
+                font.Dispose();
+        }
+
+        return false;
+    }
+
+    private int MeasureInlineRunWidth(InlineRun run, Font baseFont, Dictionary<int, Font> cache)
+    {
+        if (run.IsImage)
+            return GetInlineImageSize(run.Source).Width;
+
+        if (string.IsNullOrEmpty(run.Text))
+            return 0;
+
+        bool isCode = (run.Style & InlineStyle.Code) != 0;
+        Font runFont = GetOrCreateInlineFont(cache, baseFont, run.Style, isCode, _monoFont);
+        int width = MeasureWidth(run.Text, runFont);
+
+        if (isCode)
+            width += InlineCodePadX * 2;
+
+        return width;
     }
 
     private bool TryBuildTaskCheckboxHit(Point contentPoint, out LayoutLine line, out Rectangle hitRect)
@@ -2331,6 +2777,12 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
             return;
         }
 
+        if (line.IsImagePreview)
+        {
+            DrawImagePreview(g, line);
+            return;
+        }
+
         string display = line.Projection.DisplayText;
 
         bool isQuote = line.Kind == MarkdownBlockKind.Quote;
@@ -2410,6 +2862,389 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         }
     }
 
+    private void DrawImagePreview(Graphics g, LayoutLine line)
+    {
+        Rectangle frame = GetImagePreviewRect(line);
+
+        ImageCacheEntry entry = GetOrQueueImage(line.ImageSource);
+        if (entry.Image is not null)
+        {
+            DrawLoadedImage(g, entry.Image, frame);
+            return;
+        }
+
+        string label = entry.IsLoading
+            ? $"Loading image: {GetImageCaption(line)}"
+            : !string.IsNullOrWhiteSpace(entry.Error)
+                ? $"Image unavailable: {GetImageCaption(line)}"
+                : $"Image: {GetImageCaption(line)}";
+
+        DrawImagePlaceholder(
+            g,
+            frame,
+            label,
+            TextFormatFlags.WordBreak | TextFormatFlags.Left | TextFormatFlags.Top | TextFormatFlags.NoPrefix);
+    }
+
+    private Rectangle GetImagePreviewRect(LayoutLine line)
+    {
+        int top = line.Bounds.Top + ImagePreviewPaddingY;
+        int height = Math.Max(1, line.Bounds.Height - (ImagePreviewPaddingY * 2));
+        return new Rectangle(line.TextX, top, Math.Max(1, line.TextWidth), height);
+    }
+
+    private static Rectangle GetAspectFitRect(Size imageSize, Rectangle bounds)
+    {
+        if (imageSize.Width <= 0 || imageSize.Height <= 0)
+            return bounds;
+
+        float scale = Math.Min(
+            bounds.Width / (float)imageSize.Width,
+            bounds.Height / (float)imageSize.Height);
+
+        scale = Math.Min(1f, scale);
+
+        int width = Math.Max(1, (int)Math.Round(imageSize.Width * scale));
+        int height = Math.Max(1, (int)Math.Round(imageSize.Height * scale));
+        int x = bounds.X + Math.Max(0, (bounds.Width - width) / 2);
+        int y = bounds.Y + Math.Max(0, (bounds.Height - height) / 2);
+
+        return new Rectangle(x, y, width, height);
+    }
+
+    private string GetImageCaption(LayoutLine line)
+    {
+        if (!string.IsNullOrWhiteSpace(line.ImageAltText))
+            return line.ImageAltText;
+
+        if (!string.IsNullOrWhiteSpace(line.ImageSource))
+            return line.ImageSource;
+
+        return "image";
+    }
+
+    private string GetImageCaption(InlineRun run)
+    {
+        if (!string.IsNullOrWhiteSpace(run.AltText))
+            return run.AltText;
+
+        if (!string.IsNullOrWhiteSpace(run.Source))
+            return run.Source;
+
+        return "image";
+    }
+
+    private Size GetInlineImageSize(string source)
+        => InlineImageMetrics.CalculateSize(source, TryGetCachedImageSize);
+
+    private void DrawInlineImage(Graphics g, InlineRun run, Rectangle bounds)
+    {
+        ImageCacheEntry entry = GetOrQueueImage(run.Source);
+        if (entry.Image is not null)
+        {
+            DrawLoadedImage(g, entry.Image, bounds);
+            return;
+        }
+
+        string label = entry.IsLoading
+            ? $"Loading {GetImageCaption(run)}"
+            : !string.IsNullOrWhiteSpace(entry.Error)
+                ? "Image unavailable"
+                : GetImageCaption(run);
+
+        DrawImagePlaceholder(
+            g,
+            bounds,
+            label,
+            TextFormatFlags.EndEllipsis | TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix);
+    }
+
+    private void DrawLoadedImage(Graphics g, Image image, Rectangle bounds)
+    {
+        Rectangle imageRect = GetAspectFitRect(image.Size, bounds);
+        var previousMode = g.InterpolationMode;
+        g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+        g.DrawImage(image, imageRect);
+        g.InterpolationMode = previousMode;
+    }
+
+    private void DrawImagePlaceholder(Graphics g, Rectangle bounds, string label, TextFormatFlags flags)
+    {
+        using var borderPen = new Pen(_imagePlaceholderBorder, 1f);
+        using var backBrush = new SolidBrush(_imagePlaceholderBack);
+        g.FillRectangle(backBrush, bounds);
+        g.DrawRectangle(borderPen, bounds);
+
+        Rectangle textRect = Rectangle.Inflate(bounds, -6, -6);
+        if (textRect.Width <= 0 || textRect.Height <= 0)
+            return;
+
+        TextRenderer.DrawText(
+            g,
+            label,
+            Font,
+            textRect,
+            _imagePlaceholderText,
+            flags);
+    }
+
+    private void DrawLinkText(Graphics g, string text, Font font, Point location)
+    {
+        if (string.IsNullOrEmpty(text))
+            return;
+
+        DrawTextGdiPlus(g, text, font, location, _linkColor);
+
+        int width = MeasureWidth(g, text, font);
+        int height = MeasureHeight(g, font);
+        int underlineY = location.Y + Math.Max(1, height - 1);
+
+        using var pen = new Pen(_linkColor, 1f);
+        g.DrawLine(pen, location.X, underlineY, location.X + Math.Max(1, width), underlineY);
+    }
+
+    private Size? TryGetCachedImageSize(string source)
+    {
+        ImageCacheEntry entry = GetOrQueueImage(source);
+        return entry.Image?.Size;
+    }
+
+    private ImageCacheEntry GetOrQueueImage(string source)
+    {
+        if (!TryResolveImageLocation(source, out string cacheKey, out Uri? remoteUri, out string? localPath))
+        {
+            return new ImageCacheEntry
+            {
+                DisplaySource = source,
+                Error = "Unsupported image source."
+            };
+        }
+
+        lock (_imageCacheSync)
+        {
+            if (_imageCache.TryGetValue(cacheKey, out var existing))
+                return existing;
+
+            var created = new ImageCacheEntry
+            {
+                DisplaySource = source,
+                IsLoading = true
+            };
+
+            _imageCache[cacheKey] = created;
+
+            if (remoteUri is not null)
+                _ = Task.Run(() => LoadRemoteImageAsync(cacheKey, remoteUri));
+            else if (!string.IsNullOrWhiteSpace(localPath))
+                _ = Task.Run(() => LoadLocalImage(cacheKey, localPath));
+            else
+                created.Error = "Image source could not be resolved.";
+
+            return created;
+        }
+    }
+
+    private bool TryResolveImageLocation(
+        string source,
+        out string cacheKey,
+        out Uri? remoteUri,
+        out string? localPath)
+    {
+        cacheKey = string.Empty;
+        remoteUri = null;
+        localPath = null;
+
+        string raw = (source ?? string.Empty).Trim();
+        if (string.IsNullOrEmpty(raw))
+            return false;
+
+        if (Uri.TryCreate(raw, UriKind.Absolute, out Uri? absoluteUri))
+        {
+            if (absoluteUri.IsFile)
+            {
+                localPath = Path.GetFullPath(absoluteUri.LocalPath);
+                cacheKey = localPath;
+                return true;
+            }
+
+            if (string.Equals(absoluteUri.Scheme, Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(absoluteUri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase))
+            {
+                remoteUri = absoluteUri;
+                cacheKey = absoluteUri.AbsoluteUri;
+                return true;
+            }
+        }
+
+        string basePath = _documentBasePath ?? Environment.CurrentDirectory;
+        string combined = Path.IsPathRooted(raw)
+            ? raw
+            : Path.Combine(basePath, raw);
+
+        localPath = Path.GetFullPath(combined);
+        cacheKey = localPath;
+        return true;
+    }
+
+    private async Task LoadRemoteImageAsync(string cacheKey, Uri uri)
+    {
+        try
+        {
+            byte[] bytes = await ImageHttpClient.GetByteArrayAsync(uri);
+            Image image = LoadImageFromBytes(bytes, uri.AbsoluteUri);
+            CompleteImageLoad(cacheKey, image, error: null);
+        }
+        catch (Exception ex)
+        {
+            CompleteImageLoad(cacheKey, image: null, error: ex.Message);
+        }
+    }
+
+    private void LoadLocalImage(string cacheKey, string localPath)
+    {
+        try
+        {
+            if (!File.Exists(localPath))
+            {
+                CompleteImageLoad(cacheKey, image: null, error: "File not found.");
+                return;
+            }
+
+            byte[] bytes = File.ReadAllBytes(localPath);
+            Image image = LoadImageFromBytes(bytes, localPath);
+            CompleteImageLoad(cacheKey, image, error: null);
+        }
+        catch (Exception ex)
+        {
+            CompleteImageLoad(cacheKey, image: null, error: ex.Message);
+        }
+    }
+
+    private static Image LoadImageFromBytes(byte[] bytes, string sourceHint)
+    {
+        if (bytes.Length == 0)
+            throw new InvalidOperationException("Image stream is empty.");
+
+        if (LooksLikeSvg(sourceHint, bytes))
+            return LoadSvgBitmap(bytes);
+
+        using var stream = new MemoryStream(bytes, writable: false);
+        using var loaded = Image.FromStream(stream);
+        return new Bitmap(loaded);
+    }
+
+    private static bool LooksLikeSvg(string sourceHint, byte[] bytes)
+    {
+        if (!string.IsNullOrWhiteSpace(sourceHint))
+        {
+            string candidate = sourceHint;
+            if (Uri.TryCreate(sourceHint, UriKind.Absolute, out Uri? uri))
+                candidate = uri.AbsolutePath;
+
+            if (string.Equals(Path.GetExtension(candidate), ".svg", StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+
+        string prefix = Encoding.UTF8.GetString(bytes, 0, Math.Min(bytes.Length, 2048)).TrimStart('\uFEFF', ' ', '\t', '\r', '\n');
+        return prefix.StartsWith("<svg", StringComparison.OrdinalIgnoreCase) ||
+               (prefix.StartsWith("<?xml", StringComparison.OrdinalIgnoreCase) &&
+                prefix.Contains("<svg", StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static Image LoadSvgBitmap(byte[] bytes)
+    {
+        using var stream = new MemoryStream(bytes, writable: false);
+        using var svg = new Svg.Skia.SKSvg();
+        SkiaSharp.SKPicture picture = svg.Load(stream)
+            ?? throw new InvalidOperationException("SVG could not be parsed.");
+
+        SkiaSharp.SKRect bounds = picture.CullRect;
+        float sourceWidth = bounds.Width > 0 ? bounds.Width : 256f;
+        float sourceHeight = bounds.Height > 0 ? bounds.Height : 256f;
+
+        float scale = Math.Min(
+            1f,
+            Math.Min(
+                SvgRasterMaxWidth / sourceWidth,
+                SvgRasterMaxHeight / sourceHeight));
+
+        int width = Math.Max(1, (int)Math.Ceiling(sourceWidth * scale));
+        int height = Math.Max(1, (int)Math.Ceiling(sourceHeight * scale));
+
+        using var bitmap = new SkiaSharp.SKBitmap(
+            new SkiaSharp.SKImageInfo(
+                width,
+                height,
+                SkiaSharp.SKColorType.Bgra8888,
+                SkiaSharp.SKAlphaType.Premul));
+        using var canvas = new SkiaSharp.SKCanvas(bitmap);
+        canvas.Clear(SkiaSharp.SKColors.Transparent);
+        canvas.Scale(width / sourceWidth, height / sourceHeight);
+        canvas.Translate(-bounds.Left, -bounds.Top);
+        canvas.DrawPicture(picture);
+        canvas.Flush();
+
+        using var image = SkiaSharp.SKImage.FromBitmap(bitmap);
+        using SkiaSharp.SKData data = image.Encode(SkiaSharp.SKEncodedImageFormat.Png, 100);
+        using var encoded = new MemoryStream(data.ToArray(), writable: false);
+        using var loaded = Image.FromStream(encoded);
+        return new Bitmap(loaded);
+    }
+
+    private void CompleteImageLoad(string cacheKey, Image? image, string? error)
+    {
+        lock (_imageCacheSync)
+        {
+            if (!_imageCache.TryGetValue(cacheKey, out var entry))
+            {
+                image?.Dispose();
+                return;
+            }
+
+            entry.Image?.Dispose();
+            entry.Image = image;
+            entry.Error = error;
+            entry.IsLoading = false;
+        }
+
+        NotifyImageContentChanged();
+    }
+
+    private void NotifyImageContentChanged()
+    {
+        if (IsDisposed || !IsHandleCreated)
+            return;
+
+        try
+        {
+            BeginInvoke((MethodInvoker)(() =>
+            {
+                if (IsDisposed)
+                    return;
+
+                InvalidateLayoutContext();
+                RefreshLayoutForCaretContext(force: true);
+                RepositionCellEditor();
+                Invalidate();
+            }));
+        }
+        catch
+        {
+            // ignore handle teardown races
+        }
+    }
+
+    private void ClearImageCache()
+    {
+        lock (_imageCacheSync)
+        {
+            foreach (var entry in _imageCache.Values)
+                entry.Image?.Dispose();
+
+            _imageCache.Clear();
+        }
+    }
+
     private void DrawTable(Graphics g, TableLayout table)
     {
         using var headerBrush = new SolidBrush(_tableHeaderBg);
@@ -2469,6 +3304,12 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         {
             foreach (var run in runs)
             {
+                if (run.IsImage)
+                {
+                    width += GetInlineImageSize(run.Source).Width;
+                    continue;
+                }
+
                 if (string.IsNullOrEmpty(run.Text)) continue;
 
                 bool isCode = (run.Style & InlineStyle.Code) != 0;
@@ -2526,10 +3367,26 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         {
             foreach (var run in runs)
             {
+                if (run.IsImage)
+                {
+                    Size imageSize = GetInlineImageSize(run.Source);
+                    int imageY = clipRectContent.Top + Math.Max(0, (clipRectContent.Height - imageSize.Height) / 2);
+                    DrawInlineImage(g, run, new Rectangle(x, imageY, imageSize.Width, imageSize.Height));
+                    x += imageSize.Width;
+                    continue;
+                }
+
                 if (string.IsNullOrEmpty(run.Text)) continue;
 
                 bool isCode = (run.Style & InlineStyle.Code) != 0;
                 Font runFont = GetOrCreateTableRunFont(cache, baseFont, run.Style, isCode);
+
+                if (run.IsLink)
+                {
+                    DrawLinkText(g, run.Text, runFont, new Point(x, start.Y));
+                    x += MeasureWidth(g, run.Text, runFont);
+                    continue;
+                }
 
                 if (!isCode)
                 {
@@ -2586,6 +3443,9 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
     private static int MeasureHeight(Graphics g, Font font) => (int)Math.Ceiling(font.GetHeight(g));
 
     private static int MeasureWidth(Graphics g, string text, Font font)
+        => (int)Math.Ceiling(MeasureAdvanceWidth(g, text, font));
+
+    private static float MeasureAdvanceWidth(Graphics g, string text, Font font)
     {
         if (string.IsNullOrEmpty(text)) return 0;
 
@@ -2596,13 +3456,72 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         try
         {
             RectangleF bounds = regions[0].GetBounds(g);
-            return (int)Math.Ceiling(bounds.Width);
+            return bounds.Width;
         }
         finally
         {
             foreach (Region region in regions)
                 region.Dispose();
         }
+    }
+
+    private static float[] MeasurePrefixAdvances(Graphics g, string text, Font font)
+    {
+        var offsets = new float[text.Length + 1];
+        if (text.Length == 0)
+            return offsets;
+
+        const int maxRangesPerBatch = 32;
+        float layoutHeight = Math.Max(64f, font.GetHeight(g) * 4f);
+        var layoutRect = new RectangleF(0, 0, 100000f, layoutHeight);
+
+        for (int batchStart = 1; batchStart <= text.Length; batchStart += maxRangesPerBatch)
+        {
+            int count = Math.Min(maxRangesPerBatch, text.Length - batchStart + 1);
+            var ranges = new CharacterRange[count];
+            for (int i = 0; i < count; i++)
+                ranges[i] = new CharacterRange(0, batchStart + i);
+
+            using StringFormat format = (StringFormat)MeasureStringFormat.Clone();
+            format.SetMeasurableCharacterRanges(ranges);
+
+            Region[] regions = g.MeasureCharacterRanges(text, font, layoutRect, format);
+            try
+            {
+                for (int i = 0; i < count; i++)
+                {
+                    int idx = batchStart + i;
+                    RectangleF bounds = regions[i].GetBounds(g);
+                    offsets[idx] = Math.Max(offsets[idx - 1], bounds.Width);
+                }
+            }
+            finally
+            {
+                foreach (Region region in regions)
+                    region.Dispose();
+            }
+        }
+
+        return offsets;
+    }
+
+    private static float MeasureInkWidth(Graphics g, string text, Font font)
+    {
+        if (string.IsNullOrEmpty(text))
+            return 0;
+
+        using var path = new GraphicsPath();
+        float emSize = font.SizeInPoints * g.DpiY / 72f;
+        path.AddString(
+            text,
+            font.FontFamily,
+            (int)font.Style,
+            emSize,
+            PointF.Empty,
+            StringFormat.GenericTypographic);
+
+        RectangleF bounds = path.GetBounds();
+        return bounds.Width;
     }
 
     private static void DrawTextGdiPlus(Graphics g, string text, Font font, Point pt, Color color)
@@ -2634,6 +3553,13 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
             selEndSrc = Math.Clamp(selEndSrc, 0, srcLen);
             if (selEndSrc <= selStartSrc) continue;
 
+            if (line.IsImagePreview)
+            {
+                Rectangle imageRect = Rectangle.Inflate(GetImagePreviewRect(line), -1, -1);
+                g.FillRectangle(brush, imageRect);
+                continue;
+            }
+
             int visStart = line.Projection.SourceToVisual[selStartSrc];
             int visEnd = line.Projection.SourceToVisual[selEndSrc];
 
@@ -2642,8 +3568,8 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
             visEnd = Math.Clamp(visEnd, 0, display.Length);
             if (visEnd <= visStart) continue;
 
-            float x1 = SnapVisualX(line.TextX + MeasureVisualPrefix(line, visStart));
-            float x2 = SnapVisualX(line.TextX + MeasureVisualPrefix(line, visEnd));
+            float x1 = SnapVisualX(line.TextX + MeasureVisualPrefix(g, line, visStart));
+            float x2 = SnapVisualX(line.TextX + MeasureVisualPrefix(g, line, visEnd));
             float width = Math.Max(1f, x2 - x1);
             float height = Math.Max(1f, line.Bounds.Height - 2);
 
@@ -2839,7 +3765,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         string display = line.Projection.DisplayText;
         visCol = Math.Clamp(visCol, 0, display.Length);
 
-        float x = SnapVisualX(line.TextX + MeasureVisualPrefix(line, visCol));
+        float x = SnapVisualX(line.TextX + MeasureVisualPrefix(g, line, visCol));
 
         using var p = new Pen(ForeColor, 1f);
         g.DrawLine(p, x, line.Bounds.Top + 2, x, line.Bounds.Bottom - 2);
@@ -3312,6 +4238,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
             _monoFont,
             DeviceDpi,
             DeviceDpi,
+            TryGetCachedImageSize,
             _rawTableStartLines,
             rawCodeFenceStarts,
             rawSourceLines,
@@ -3638,14 +4565,32 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         {
             foreach (var run in line.InlineRuns)
             {
+                if (run.IsImage)
+                {
+                    Size imageSize = GetInlineImageSize(run.Source);
+                    int imageY = line.Bounds.Top + Math.Max(0, (line.Bounds.Height - imageSize.Height) / 2);
+                    DrawInlineImage(g, run, new Rectangle(x, imageY, imageSize.Width, imageSize.Height));
+                    x += imageSize.Width;
+                    continue;
+                }
+
                 if (string.IsNullOrEmpty(run.Text)) continue;
 
                 bool isCode = (run.Style & InlineStyle.Code) != 0;
                 Font runFont = GetOrCreateInlineFont(cache, baseFont, run.Style, isCode, _monoFont);
 
+                if (run.IsLink)
+                {
+                    int runTextY = line.Bounds.Top + Math.Max(0, (line.Bounds.Height - MeasureHeight(g, runFont)) / 2);
+                    DrawLinkText(g, run.Text, runFont, new Point(x, runTextY));
+                    x += MeasureWidth(g, run.Text, runFont);
+                    continue;
+                }
+
                 if (!isCode)
                 {
-                    DrawTextGdiPlus(g, run.Text, runFont, new Point(x, contentTextStart.Y), ForeColor);
+                    int runTextY = line.Bounds.Top + Math.Max(0, (line.Bounds.Height - MeasureHeight(g, runFont)) / 2);
+                    DrawTextGdiPlus(g, run.Text, runFont, new Point(x, runTextY), ForeColor);
                     x += MeasureWidth(g, run.Text, runFont);
                     continue;
                 }
@@ -3686,6 +4631,137 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
 
         visualCols = Math.Clamp(visualCols, 0, offsets.Length - 1);
         return offsets[visualCols];
+    }
+
+    private float MeasureVisualPrefix(Graphics g, LayoutLine line, int visualCols)
+    {
+        float[] offsets = BuildRenderVisualOffsets(g, line);
+        if (offsets.Length == 0)
+            return 0;
+
+        visualCols = Math.Clamp(visualCols, 0, offsets.Length - 1);
+        return offsets[visualCols];
+    }
+
+    private float[] BuildRenderVisualOffsets(Graphics g, LayoutLine line)
+    {
+        string display = line.Projection.DisplayText;
+        if (string.IsNullOrEmpty(display))
+            return Array.Empty<float>();
+
+        IReadOnlyList<InlineRun> runs = line.InlineRuns;
+        Font baseFont = GetRenderFont(line);
+
+        if (runs.Count == 0)
+            return MeasurePrefixAdvances(g, display, baseFont);
+
+        var offsets = new float[display.Length + 1];
+        int col = 0;
+        float width = 0f;
+        var cache = new Dictionary<int, Font>();
+
+        try
+        {
+            foreach (InlineRun run in runs)
+            {
+                if (run.IsImage)
+                {
+                    col += Math.Max(1, run.VisualLength);
+                    offsets[col] = width + GetInlineImageSize(run.Source).Width;
+                    width = offsets[col];
+                    continue;
+                }
+
+                if (string.IsNullOrEmpty(run.Text))
+                    continue;
+
+                bool isCode = (run.Style & InlineStyle.Code) != 0;
+                Font runFont = GetOrCreateInlineFont(cache, baseFont, run.Style, isCode, _monoFont);
+
+                if (isCode)
+                    width += InlineCodePadX;
+
+                float[] runOffsets = MeasurePrefixAdvances(g, run.Text, runFont);
+                for (int i = 1; i < runOffsets.Length; i++)
+                {
+                    col++;
+                    offsets[col] = width + runOffsets[i];
+                }
+
+                if (isCode)
+                    offsets[col] += InlineCodePadX;
+
+                width = offsets[col];
+            }
+        }
+        finally
+        {
+            foreach (Font font in cache.Values)
+                font.Dispose();
+        }
+
+        offsets[^1] = Math.Max(offsets[^1], MeasureRenderedLineWidth(g, display, runs, baseFont));
+        return offsets;
+    }
+
+    private float MeasureRenderedLineWidth(Graphics g, string display, IReadOnlyList<InlineRun> runs, Font baseFont)
+    {
+        if (string.IsNullOrEmpty(display))
+            return 0;
+
+        if (runs.Count == 0)
+        {
+            return Math.Max(
+                MeasureAdvanceWidth(g, display, baseFont),
+                MeasureInkWidth(g, display, baseFont));
+        }
+
+        float width = 0f;
+        var cache = new Dictionary<int, Font>();
+
+        try
+        {
+            for (int i = 0; i < runs.Count; i++)
+            {
+                InlineRun run = runs[i];
+
+                if (run.IsImage)
+                {
+                    width += GetInlineImageSize(run.Source).Width;
+                    continue;
+                }
+
+                if (string.IsNullOrEmpty(run.Text))
+                    continue;
+
+                bool isCode = (run.Style & InlineStyle.Code) != 0;
+                Font runFont = GetOrCreateInlineFont(cache, baseFont, run.Style, isCode, _monoFont);
+
+                float advanceWidth = MeasureAdvanceWidth(g, run.Text, runFont);
+                if (isCode)
+                {
+                    width += advanceWidth + InlineCodePadX * 2;
+                    continue;
+                }
+
+                if (i == runs.Count - 1)
+                {
+                    float inkWidth = MeasureInkWidth(g, run.Text, runFont);
+                    width += Math.Max(advanceWidth, inkWidth);
+                }
+                else
+                {
+                    width += advanceWidth;
+                }
+            }
+        }
+        finally
+        {
+            foreach (Font font in cache.Values)
+                font.Dispose();
+        }
+
+        return width;
     }
 
     private void ResetCaretBlink()

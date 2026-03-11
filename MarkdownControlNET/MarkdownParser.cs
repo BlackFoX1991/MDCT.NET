@@ -71,6 +71,13 @@ public static class MarkdownParser
                 continue;
             }
 
+            if (TryParseStandaloneImage(lines[i], out string altText, out string source))
+            {
+                blocks.Add(new ImageBlock(i, altText, source));
+                i++;
+                continue;
+            }
+
             var hm = HeadingRegex.Match(line);
             if (hm.Success)
             {
@@ -522,12 +529,62 @@ public static class MarkdownParser
         return s.StartsWith("|", StringComparison.Ordinal) && s.EndsWith("|", StringComparison.Ordinal);
     }
 
+    private static bool TryParseStandaloneImage(string line, out string altText, out string source)
+    {
+        altText = string.Empty;
+        source = string.Empty;
+
+        if (string.IsNullOrWhiteSpace(line))
+            return false;
+
+        string s = line.Trim();
+        if (!s.StartsWith("![", StringComparison.Ordinal) || !s.EndsWith(")", StringComparison.Ordinal))
+            return false;
+
+        int altEnd = FindUnescapedChar(s, ']', 2);
+        if (altEnd < 0 || altEnd + 1 >= s.Length || s[altEnd + 1] != '(')
+            return false;
+
+        string rawSource = s[(altEnd + 2)..^1].Trim();
+        if (string.IsNullOrEmpty(rawSource))
+            return false;
+
+        if (rawSource.Length >= 2 && rawSource[0] == '<' && rawSource[^1] == '>')
+            rawSource = rawSource[1..^1].Trim();
+
+        if (string.IsNullOrEmpty(rawSource))
+            return false;
+
+        altText = s[2..altEnd];
+        source = rawSource;
+        return true;
+    }
+
+    private static int FindUnescapedChar(string text, char ch, int startIndex)
+    {
+        for (int i = Math.Max(0, startIndex); i < text.Length; i++)
+        {
+            if (text[i] != ch)
+                continue;
+
+            int backslashes = 0;
+            for (int j = i - 1; j >= 0 && text[j] == '\\'; j--)
+                backslashes++;
+
+            if ((backslashes & 1) == 0)
+                return i;
+        }
+
+        return -1;
+    }
+
     private static bool IsSpecialStart(IReadOnlyList<string> lines, int i)
     {
         string line = lines[i];
 
         if (string.IsNullOrWhiteSpace(line)) return true;
         if (HeadingRegex.IsMatch(line)) return true;
+        if (TryParseStandaloneImage(line, out _, out _)) return true;
         if (IsHorizontalRule(line)) return true;
         if (QuoteRegex.IsMatch(line)) return true;
         if (IsListLine(line)) return true;

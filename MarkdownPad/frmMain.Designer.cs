@@ -56,6 +56,9 @@ namespace MarkdownPad
             editToolStripSeparator2 = new ToolStripSeparator();
             selectAllToolStripMenuItem = new ToolStripMenuItem();
             formatToolStripMenuItem = new ToolStripMenuItem();
+            insertLinkToolStripMenuItem = new ToolStripMenuItem();
+            insertImageToolStripMenuItem = new ToolStripMenuItem();
+            formatToolStripSeparator0 = new ToolStripSeparator();
             tableDesignerToolStripMenuItem = new ToolStripMenuItem();
             formatToolStripSeparator1 = new ToolStripSeparator();
             headingToolStripMenuItem = new ToolStripMenuItem();
@@ -83,6 +86,9 @@ namespace MarkdownPad
             findToolStripButton = new ToolStripButton();
             findNextToolStripButton = new ToolStripButton();
             toolStripSeparator3 = new ToolStripSeparator();
+            linkToolStripButton = new ToolStripButton();
+            imageToolStripButton = new ToolStripButton();
+            toolStripSeparator9 = new ToolStripSeparator();
             tableToolStripButton = new ToolStripButton();
             headingToolStripDropDownButton = new ToolStripDropDownButton();
             heading1ToolStripDropDownItem = new ToolStripMenuItem();
@@ -109,6 +115,7 @@ namespace MarkdownPad
             themeStatusLabel = new ToolStripLabel();
             toolStripSeparator7 = new ToolStripSeparator();
             messageStatusLabel = new ToolStripLabel();
+            helpToolStripMenuItem = new ToolStripMenuItem();
             tabContextMenuStrip.SuspendLayout();
             padMenu.SuspendLayout();
             padToolStrip.SuspendLayout();
@@ -170,7 +177,7 @@ namespace MarkdownPad
             // padMenu
             // 
             padMenu.ImageScalingSize = new Size(20, 20);
-            padMenu.Items.AddRange(new ToolStripItem[] { fileToolStripMenuItem, editToolStripMenuItem, formatToolStripMenuItem, searchToolStripMenuItem });
+            padMenu.Items.AddRange(new ToolStripItem[] { fileToolStripMenuItem, editToolStripMenuItem, formatToolStripMenuItem, searchToolStripMenuItem, helpToolStripMenuItem });
             padMenu.Location = new Point(0, 0);
             padMenu.Name = "padMenu";
             padMenu.Padding = new Padding(5, 2, 0, 2);
@@ -352,29 +359,48 @@ namespace MarkdownPad
             // 
             // formatToolStripMenuItem
             // 
-            formatToolStripMenuItem.DropDownItems.AddRange(new ToolStripItem[] { tableDesignerToolStripMenuItem, formatToolStripSeparator1, headingToolStripMenuItem, formatToolStripSeparator2, quoteToolStripMenuItem, codeFenceToolStripMenuItem });
+            formatToolStripMenuItem.DropDownItems.AddRange(new ToolStripItem[] { insertLinkToolStripMenuItem, insertImageToolStripMenuItem, formatToolStripSeparator0, tableDesignerToolStripMenuItem, formatToolStripSeparator1, headingToolStripMenuItem, formatToolStripSeparator2, quoteToolStripMenuItem, codeFenceToolStripMenuItem });
             formatToolStripMenuItem.Name = "formatToolStripMenuItem";
             formatToolStripMenuItem.Size = new Size(57, 20);
             formatToolStripMenuItem.Text = "F&ormat";
+            // 
+            // insertLinkToolStripMenuItem
+            // 
+            insertLinkToolStripMenuItem.Name = "insertLinkToolStripMenuItem";
+            insertLinkToolStripMenuItem.ShortcutKeys = Keys.Control | Keys.K;
+            insertLinkToolStripMenuItem.Size = new Size(222, 22);
+            insertLinkToolStripMenuItem.Text = "Insert Link...";
+            // 
+            // insertImageToolStripMenuItem
+            // 
+            insertImageToolStripMenuItem.Name = "insertImageToolStripMenuItem";
+            insertImageToolStripMenuItem.ShortcutKeys = Keys.Control | Keys.Shift | Keys.I;
+            insertImageToolStripMenuItem.Size = new Size(222, 22);
+            insertImageToolStripMenuItem.Text = "Insert Image...";
+            // 
+            // formatToolStripSeparator0
+            // 
+            formatToolStripSeparator0.Name = "formatToolStripSeparator0";
+            formatToolStripSeparator0.Size = new Size(219, 6);
             // 
             // tableDesignerToolStripMenuItem
             // 
             tableDesignerToolStripMenuItem.Image = (Image)resources.GetObject("tableDesignerToolStripMenuItem.Image");
             tableDesignerToolStripMenuItem.Name = "tableDesignerToolStripMenuItem";
-            tableDesignerToolStripMenuItem.Size = new Size(184, 26);
+            tableDesignerToolStripMenuItem.Size = new Size(222, 22);
             tableDesignerToolStripMenuItem.Text = "Table Designer...";
             // 
             // formatToolStripSeparator1
             // 
             formatToolStripSeparator1.Name = "formatToolStripSeparator1";
-            formatToolStripSeparator1.Size = new Size(157, 6);
+            formatToolStripSeparator1.Size = new Size(219, 6);
             // 
             // headingToolStripMenuItem
             // 
             headingToolStripMenuItem.DropDownItems.AddRange(new ToolStripItem[] { heading1ToolStripMenuItem, heading2ToolStripMenuItem, heading3ToolStripMenuItem, heading4ToolStripMenuItem, heading5ToolStripMenuItem, heading6ToolStripMenuItem });
             headingToolStripMenuItem.Image = (Image)resources.GetObject("headingToolStripMenuItem.Image");
             headingToolStripMenuItem.Name = "headingToolStripMenuItem";
-            headingToolStripMenuItem.Size = new Size(184, 26);
+            headingToolStripMenuItem.Size = new Size(222, 22);
             headingToolStripMenuItem.Text = "Heading";
             // 
             // heading1ToolStripMenuItem
@@ -416,20 +442,20 @@ namespace MarkdownPad
             // formatToolStripSeparator2
             // 
             formatToolStripSeparator2.Name = "formatToolStripSeparator2";
-            formatToolStripSeparator2.Size = new Size(157, 6);
+            formatToolStripSeparator2.Size = new Size(219, 6);
             // 
             // quoteToolStripMenuItem
             // 
             quoteToolStripMenuItem.Image = (Image)resources.GetObject("quoteToolStripMenuItem.Image");
             quoteToolStripMenuItem.Name = "quoteToolStripMenuItem";
-            quoteToolStripMenuItem.Size = new Size(184, 26);
+            quoteToolStripMenuItem.Size = new Size(222, 22);
             quoteToolStripMenuItem.Text = "Quote";
             // 
             // codeFenceToolStripMenuItem
             // 
             codeFenceToolStripMenuItem.Image = (Image)resources.GetObject("codeFenceToolStripMenuItem.Image");
             codeFenceToolStripMenuItem.Name = "codeFenceToolStripMenuItem";
-            codeFenceToolStripMenuItem.Size = new Size(184, 26);
+            codeFenceToolStripMenuItem.Size = new Size(222, 22);
             codeFenceToolStripMenuItem.Text = "Code Fence";
             // 
             // searchToolStripMenuItem
@@ -460,7 +486,7 @@ namespace MarkdownPad
             padToolStrip.AutoSize = false;
             padToolStrip.GripStyle = ToolStripGripStyle.Hidden;
             padToolStrip.ImageScalingSize = new Size(20, 20);
-            padToolStrip.Items.AddRange(new ToolStripItem[] { newToolStripButton, openToolStripButton, saveToolStripButton, saveAllToolStripButton, toolStripSeparator1, undoToolStripButton, redoToolStripButton, toolStripSeparator2, findToolStripButton, findNextToolStripButton, toolStripSeparator3, tableToolStripButton, headingToolStripDropDownButton, quoteToolStripButton, codeFenceToolStripButton, toolStripSeparator8, themeToolStripDropDownButton });
+            padToolStrip.Items.AddRange(new ToolStripItem[] { newToolStripButton, openToolStripButton, saveToolStripButton, saveAllToolStripButton, toolStripSeparator1, undoToolStripButton, redoToolStripButton, toolStripSeparator2, findToolStripButton, findNextToolStripButton, toolStripSeparator3, linkToolStripButton, imageToolStripButton, toolStripSeparator9, tableToolStripButton, headingToolStripDropDownButton, quoteToolStripButton, codeFenceToolStripButton, toolStripSeparator8, themeToolStripDropDownButton });
             padToolStrip.Location = new Point(0, 24);
             padToolStrip.Name = "padToolStrip";
             padToolStrip.Size = new Size(1063, 72);
@@ -506,7 +532,7 @@ namespace MarkdownPad
             // toolStripSeparator1
             // 
             toolStripSeparator1.Name = "toolStripSeparator1";
-            toolStripSeparator1.Size = new Size(6, 27);
+            toolStripSeparator1.Size = new Size(6, 72);
             // 
             // undoToolStripButton
             // 
@@ -529,7 +555,7 @@ namespace MarkdownPad
             // toolStripSeparator2
             // 
             toolStripSeparator2.Name = "toolStripSeparator2";
-            toolStripSeparator2.Size = new Size(6, 27);
+            toolStripSeparator2.Size = new Size(6, 72);
             // 
             // findToolStripButton
             // 
@@ -552,7 +578,26 @@ namespace MarkdownPad
             // toolStripSeparator3
             // 
             toolStripSeparator3.Name = "toolStripSeparator3";
-            toolStripSeparator3.Size = new Size(6, 27);
+            toolStripSeparator3.Size = new Size(6, 72);
+            // 
+            // linkToolStripButton
+            // 
+            linkToolStripButton.DisplayStyle = ToolStripItemDisplayStyle.Text;
+            linkToolStripButton.Name = "linkToolStripButton";
+            linkToolStripButton.Size = new Size(33, 69);
+            linkToolStripButton.Text = "Link";
+            // 
+            // imageToolStripButton
+            // 
+            imageToolStripButton.DisplayStyle = ToolStripItemDisplayStyle.Text;
+            imageToolStripButton.Name = "imageToolStripButton";
+            imageToolStripButton.Size = new Size(43, 69);
+            imageToolStripButton.Text = "Image";
+            // 
+            // toolStripSeparator9
+            // 
+            toolStripSeparator9.Name = "toolStripSeparator9";
+            toolStripSeparator9.Size = new Size(6, 72);
             // 
             // tableToolStripButton
             // 
@@ -576,37 +621,37 @@ namespace MarkdownPad
             // heading1ToolStripDropDownItem
             // 
             heading1ToolStripDropDownItem.Name = "heading1ToolStripDropDownItem";
-            heading1ToolStripDropDownItem.Size = new Size(89, 22);
+            heading1ToolStripDropDownItem.Size = new Size(180, 22);
             heading1ToolStripDropDownItem.Text = "H1";
             // 
             // heading2ToolStripDropDownItem
             // 
             heading2ToolStripDropDownItem.Name = "heading2ToolStripDropDownItem";
-            heading2ToolStripDropDownItem.Size = new Size(89, 22);
+            heading2ToolStripDropDownItem.Size = new Size(180, 22);
             heading2ToolStripDropDownItem.Text = "H2";
             // 
             // heading3ToolStripDropDownItem
             // 
             heading3ToolStripDropDownItem.Name = "heading3ToolStripDropDownItem";
-            heading3ToolStripDropDownItem.Size = new Size(89, 22);
+            heading3ToolStripDropDownItem.Size = new Size(180, 22);
             heading3ToolStripDropDownItem.Text = "H3";
             // 
             // heading4ToolStripDropDownItem
             // 
             heading4ToolStripDropDownItem.Name = "heading4ToolStripDropDownItem";
-            heading4ToolStripDropDownItem.Size = new Size(89, 22);
+            heading4ToolStripDropDownItem.Size = new Size(180, 22);
             heading4ToolStripDropDownItem.Text = "H4";
             // 
             // heading5ToolStripDropDownItem
             // 
             heading5ToolStripDropDownItem.Name = "heading5ToolStripDropDownItem";
-            heading5ToolStripDropDownItem.Size = new Size(89, 22);
+            heading5ToolStripDropDownItem.Size = new Size(180, 22);
             heading5ToolStripDropDownItem.Text = "H5";
             // 
             // heading6ToolStripDropDownItem
             // 
             heading6ToolStripDropDownItem.Name = "heading6ToolStripDropDownItem";
-            heading6ToolStripDropDownItem.Size = new Size(89, 22);
+            heading6ToolStripDropDownItem.Size = new Size(180, 22);
             heading6ToolStripDropDownItem.Text = "H6";
             // 
             // quoteToolStripButton
@@ -630,7 +675,7 @@ namespace MarkdownPad
             // toolStripSeparator8
             // 
             toolStripSeparator8.Name = "toolStripSeparator8";
-            toolStripSeparator8.Size = new Size(6, 27);
+            toolStripSeparator8.Size = new Size(6, 72);
             // 
             // themeToolStripDropDownButton
             // 
@@ -734,6 +779,12 @@ namespace MarkdownPad
             messageStatusLabel.Size = new Size(39, 22);
             messageStatusLabel.Text = "Ready";
             // 
+            // helpToolStripMenuItem
+            // 
+            helpToolStripMenuItem.Name = "helpToolStripMenuItem";
+            helpToolStripMenuItem.Size = new Size(44, 20);
+            helpToolStripMenuItem.Text = "Help";
+            // 
             // frmMain
             // 
             AutoScaleDimensions = new SizeF(7F, 15F);
@@ -797,6 +848,9 @@ namespace MarkdownPad
         private ToolStripSeparator editToolStripSeparator2;
         private ToolStripMenuItem selectAllToolStripMenuItem;
         private ToolStripMenuItem formatToolStripMenuItem;
+        private ToolStripMenuItem insertLinkToolStripMenuItem;
+        private ToolStripMenuItem insertImageToolStripMenuItem;
+        private ToolStripSeparator formatToolStripSeparator0;
         private ToolStripMenuItem tableDesignerToolStripMenuItem;
         private ToolStripSeparator formatToolStripSeparator1;
         private ToolStripMenuItem headingToolStripMenuItem;
@@ -824,6 +878,9 @@ namespace MarkdownPad
         private ToolStripButton findToolStripButton;
         private ToolStripButton findNextToolStripButton;
         private ToolStripSeparator toolStripSeparator3;
+        private ToolStripButton linkToolStripButton;
+        private ToolStripButton imageToolStripButton;
+        private ToolStripSeparator toolStripSeparator9;
         private ToolStripButton tableToolStripButton;
         private ToolStripDropDownButton headingToolStripDropDownButton;
         private ToolStripMenuItem heading1ToolStripDropDownItem;
@@ -850,5 +907,6 @@ namespace MarkdownPad
         private ToolStripLabel themeStatusLabel;
         private ToolStripSeparator toolStripSeparator7;
         private ToolStripLabel messageStatusLabel;
+        private ToolStripMenuItem helpToolStripMenuItem;
     }
 }

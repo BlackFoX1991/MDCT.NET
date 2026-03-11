@@ -64,6 +64,7 @@ public sealed class padTab : TabPage
     {
         Editor.Markdown = markdown;
         FilePath = string.IsNullOrWhiteSpace(filePath) ? null : Path.GetFullPath(filePath);
+        Editor.DocumentBasePath = FilePath is null ? null : Path.GetDirectoryName(FilePath);
         Modified = false;
         UpdatePresentation();
     }
@@ -73,6 +74,7 @@ public sealed class padTab : TabPage
         if (!string.IsNullOrWhiteSpace(filePath))
             FilePath = Path.GetFullPath(filePath);
 
+        Editor.DocumentBasePath = FilePath is null ? null : Path.GetDirectoryName(FilePath);
         Modified = false;
         UpdatePresentation();
     }

@@ -7,6 +7,7 @@ public enum MarkdownBlockKind
     Blank,
     Paragraph,
     Heading,
+    Image,
     Quote,
     List,
     CodeFence,
@@ -54,6 +55,9 @@ public sealed record ParagraphBlock(int StartLine, int EndLine)
 
 public sealed record HeadingBlock(int Line, int Level, string Text)
     : MarkdownBlock(Line, Line, MarkdownBlockKind.Heading);
+
+public sealed record ImageBlock(int Line, string AltText, string Source)
+    : MarkdownBlock(Line, Line, MarkdownBlockKind.Image);
 
 /// <summary>
 /// Quote block, optionally as admonition (GitHub style):

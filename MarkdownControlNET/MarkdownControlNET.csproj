@@ -6,6 +6,57 @@
     <UseWindowsForms>true</UseWindowsForms>
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyTitle>MarkdownControlNET</AssemblyTitle>
+    <SkiaNativeArch>x64</SkiaNativeArch>
+    <SkiaNativeArch Condition="'$(PlatformTarget)' == 'x86'">x86</SkiaNativeArch>
+    <SkiaNativeArch Condition="'$(PlatformTarget)' == 'arm64'">arm64</SkiaNativeArch>
   </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Maui.Resizetizer" Version="10.0.1" GeneratePathProperty="true" ExcludeAssets="all" PrivateAssets="all" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="SkiaSharp">
+      <HintPath>$(PkgMicrosoft_Maui_Resizetizer)\buildTransitive\SkiaSharp.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+    <Reference Include="ShimSkiaSharp">
+      <HintPath>$(PkgMicrosoft_Maui_Resizetizer)\buildTransitive\ShimSkiaSharp.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+    <Reference Include="Svg.Custom">
+      <HintPath>$(PkgMicrosoft_Maui_Resizetizer)\buildTransitive\Svg.Custom.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+    <Reference Include="Svg.Model">
+      <HintPath>$(PkgMicrosoft_Maui_Resizetizer)\buildTransitive\Svg.Model.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+    <Reference Include="Svg.Skia">
+      <HintPath>$(PkgMicrosoft_Maui_Resizetizer)\buildTransitive\Svg.Skia.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+    <Reference Include="ExCSS">
+      <HintPath>$(PkgMicrosoft_Maui_Resizetizer)\buildTransitive\ExCSS.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+    <Reference Include="Fizzler">
+      <HintPath>$(PkgMicrosoft_Maui_Resizetizer)\buildTransitive\Fizzler.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+    <Reference Include="HarfBuzzSharp">
+      <HintPath>$(PkgMicrosoft_Maui_Resizetizer)\buildTransitive\HarfBuzzSharp.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+    <Reference Include="SkiaSharp.HarfBuzz">
+      <HintPath>$(PkgMicrosoft_Maui_Resizetizer)\buildTransitive\SkiaSharp.HarfBuzz.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="$(PkgMicrosoft_Maui_Resizetizer)\buildTransitive\$(SkiaNativeArch)\libSkiaSharp.dll" Link="libSkiaSharp.dll" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="$(PkgMicrosoft_Maui_Resizetizer)\buildTransitive\$(SkiaNativeArch)\libHarfBuzzSharp.dll" Link="libHarfBuzzSharp.dll" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
 
 </Project>
