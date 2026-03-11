@@ -134,6 +134,8 @@ public sealed class LayoutEngine
     private Font _boldFont = SystemFonts.DefaultFont;
     private Font _monoFont = SystemFonts.DefaultFont;
     private Func<string, Size?>? _imageSizeProvider;
+    private MarkdownFootnoteIndex _footnoteIndex = MarkdownFootnoteIndex.Empty;
+    private IReadOnlyDictionary<string, int> _footnoteDisplayNumbers = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
 
     private int _sourceLineCount;
 
@@ -160,6 +162,7 @@ public sealed class LayoutEngine
 
     private const int TableCodeChipPadX = 4;
     private const int InlineCodeChipPadX = 4;
+    private const float FootnoteFontScale = 0.82f;
     private const int ImagePreviewMaxWidth = 720;
     private const int ImagePreviewMaxHeight = 420;
     private const int ImagePreviewPlaceholderWidth = 320;
@@ -186,16 +189,18 @@ public sealed class LayoutEngine
                 if (string.IsNullOrEmpty(run.Text)) continue;
 
                 bool isCode = (run.Style & InlineStyle.Code) != 0;
+                bool isFootnoteReference = run.IsFootnoteReference;
                 InlineStyle normalized = run.Style & ~InlineStyle.Code;
 
                 int key = ((int)normalized & 0xFF)
                           | (isCode ? 0x100 : 0)
+                          | (isFootnoteReference ? 0x200 : 0)
                           | (((int)baseFont.Style & 0xFF) << 9);
 
                 if (!cache.TryGetValue(key, out var f))
                 {
                     Font seed = isCode ? _monoFont : baseFont;
-                    f = InlineMarkdown.CreateStyledFont(seed, normalized);
+                    f = CreateRunDisplayFont(seed, normalized, isFootnoteReference);
                     cache[key] = f;
                 }
 
@@ -498,6 +503,8 @@ public sealed class LayoutEngine
         _boldFont = boldFont;
         _monoFont = monoFont;
         _imageSizeProvider = imageSizeProvider;
+        _footnoteIndex = MarkdownFootnoteHelper.BuildIndex(doc.Lines);
+        _footnoteDisplayNumbers = BuildFootnoteDisplayNumbers(doc, _footnoteIndex);
 
         _lines.Clear();
         _lineBySource.Clear();
@@ -532,6 +539,16 @@ public sealed class LayoutEngine
         var imageByLine = doc.Blocks
             .OfType<ImageBlock>()
             .ToDictionary(block => block.StartLine);
+
+        var footnoteLineBySource = doc.Blocks
+            .OfType<FootnoteDefinitionBlock>()
+            .SelectMany(block => block.Lines)
+            .ToDictionary(line => line.SourceLine);
+
+        var footnoteBlockBySourceLine = doc.Blocks
+            .OfType<FootnoteDefinitionBlock>()
+            .SelectMany(block => block.Lines.Select(line => (line.SourceLine, Block: block)))
+            .ToDictionary(x => x.SourceLine, x => x.Block);
 
         var tableStarts = new Dictionary<int, TableBlock>();
         foreach (var t in doc.Blocks.OfType<TableBlock>())
@@ -649,6 +666,7 @@ public sealed class LayoutEngine
                 {
                     MarkdownBlockKind.Quote => 24,
                     MarkdownBlockKind.List => 24,
+                    MarkdownBlockKind.FootnoteDefinition => 24,
                     MarkdownBlockKind.CodeFence => 16,
                     _ => 8
                 };
@@ -754,7 +772,37 @@ public sealed class LayoutEngine
                         // Ordered/unordered/nested/task visual + stable source mapping
                         proj = BuildListProjection(source, li);
 
-                        InlineParseResult inline = ParseInlineCached(proj.DisplayText);
+                        InlineParseResult inline = ApplyFootnotePresentation(ParseInlineCached(proj.DisplayText));
+                        proj = ComposeProjection(proj, inline);
+                        runs = inline.Runs;
+                    }
+                }
+                else if (sem.Kind == MarkdownBlockKind.FootnoteDefinition &&
+                         footnoteLineBySource.TryGetValue(lineIdx, out var footnoteLine) &&
+                         footnoteBlockBySourceLine.TryGetValue(lineIdx, out var footnoteBlock))
+                {
+                    if (forceRawThisLine)
+                    {
+                        proj = CreateIdentityProjection(source);
+                        runs = proj.DisplayText.Length == 0
+                            ? Array.Empty<InlineRun>()
+                            : new[] { new InlineRun(proj.DisplayText, InlineStyle.None) };
+                    }
+                    else
+                    {
+                        var hideRanges = new List<(int Start, int Length)>(1);
+                        if (footnoteLine.ContentStartColumn > 0)
+                            hideRanges.Add((0, footnoteLine.ContentStartColumn));
+
+                        proj = hideRanges.Count == 0
+                            ? CreateIdentityProjection(source)
+                            : BuildProjectionHidingRanges(source, hideRanges);
+
+                        InlineParseResult inline = ApplyFootnoteDefinitionPresentation(
+                            ParseInlineCached(proj.DisplayText),
+                            footnoteBlock,
+                            isFirstLine: footnoteLine.IsFirstLine,
+                            isLastLine: lineIdx == footnoteBlock.EndLine);
                         proj = ComposeProjection(proj, inline);
                         runs = inline.Runs;
                     }
@@ -776,7 +824,7 @@ public sealed class LayoutEngine
                         }
                         else
                         {
-                            InlineParseResult inline = ParseInlineCached(prefixProj.DisplayText);
+                            InlineParseResult inline = ApplyFootnotePresentation(ParseInlineCached(prefixProj.DisplayText));
                             proj = ComposeProjection(prefixProj, inline);
                             runs = inline.Runs;
                         }
@@ -1029,7 +1077,7 @@ public sealed class LayoutEngine
             for (int r = 0; r < rows; r++)
             {
                 string raw = model.Rows[r][c] ?? string.Empty;
-                InlineParseResult parsed = ParseInlineCached(raw);
+                InlineParseResult parsed = ApplyFootnotePresentation(ParseInlineCached(raw));
 
                 texts[r, c] = parsed.Text;
                 runs[r, c] = parsed.Runs;
@@ -1093,12 +1141,174 @@ public sealed class LayoutEngine
         return parsed;
     }
 
+    private static IReadOnlyDictionary<string, int> BuildFootnoteDisplayNumbers(DocumentModel doc, MarkdownFootnoteIndex index)
+    {
+        var numbers = new Dictionary<string, int>(index.NumbersByLabel, StringComparer.OrdinalIgnoreCase);
+        int next = numbers.Count == 0 ? 1 : numbers.Values.Max() + 1;
+
+        foreach (FootnoteDefinitionBlock block in doc.Blocks.OfType<FootnoteDefinitionBlock>())
+        {
+            if (numbers.ContainsKey(block.NormalizedLabel))
+                continue;
+
+            numbers[block.NormalizedLabel] = next++;
+        }
+
+        return numbers;
+    }
+
+    private InlineParseResult ApplyFootnotePresentation(InlineParseResult parsed)
+        => PresentInlineWithFootnotes(parsed, prefixText: string.Empty, suffixRuns: null);
+
+    private InlineParseResult ApplyFootnoteDefinitionPresentation(
+        InlineParseResult parsed,
+        FootnoteDefinitionBlock block,
+        bool isFirstLine,
+        bool isLastLine)
+    {
+        string prefixText = string.Empty;
+        if (isFirstLine && _footnoteDisplayNumbers.TryGetValue(block.NormalizedLabel, out int number))
+            prefixText = $"{number}. ";
+
+        List<InlineRun>? suffixRuns = null;
+        IReadOnlyList<MarkdownPosition> referencePositions = _footnoteIndex.GetReferencePositions(block.NormalizedLabel);
+        if (isLastLine && referencePositions.Count > 0)
+        {
+            suffixRuns = [new InlineRun(" ", InlineStyle.None)];
+
+            for (int i = 0; i < referencePositions.Count; i++)
+            {
+                if (i > 0)
+                    suffixRuns.Add(new InlineRun(" ", InlineStyle.None));
+
+                string label = i == 0 ? "↩" : $"↩{i + 1}";
+                suffixRuns.Add(InlineRun.Link(
+                    label,
+                    MarkdownFootnoteHelper.BuildReferenceAnchor(block.NormalizedLabel, i + 1),
+                    InlineStyle.None));
+            }
+        }
+
+        return PresentInlineWithFootnotes(parsed, prefixText, suffixRuns);
+    }
+
+    private InlineParseResult PresentInlineWithFootnotes(
+        InlineParseResult parsed,
+        string prefixText,
+        IReadOnlyList<InlineRun>? suffixRuns)
+    {
+        parsed ??= new InlineParseResult(string.Empty, Array.Empty<InlineRun>(), new[] { 0 }, new[] { 0 });
+
+        int srcN = parsed.Text.Length;
+        var sourceToVisual = new int[srcN + 1];
+        var visualToSource = new List<int> { 0 };
+        var runs = new List<InlineRun>();
+        int outPos = 0;
+
+        if (!string.IsNullOrEmpty(prefixText))
+        {
+            runs.Add(new InlineRun(prefixText, InlineStyle.None));
+            for (int i = 0; i < prefixText.Length; i++)
+            {
+                outPos++;
+                visualToSource.Add(0);
+            }
+        }
+
+        sourceToVisual[0] = outPos;
+
+        int srcCursor = 0;
+        foreach (InlineRun run in parsed.Runs)
+        {
+            int oldLen = run.Text.Length;
+            IReadOnlyList<InlineRun> presentedRuns = PresentRun(run);
+            int newLen = presentedRuns.Sum(r => r.Text.Length);
+
+            for (int offset = 0; offset <= oldLen; offset++)
+            {
+                sourceToVisual[srcCursor + offset] = outPos + ScaleBoundary(offset, oldLen, newLen);
+            }
+
+            foreach (InlineRun presentedRun in presentedRuns)
+                runs.Add(presentedRun);
+
+            for (int visualOffset = 1; visualOffset <= newLen; visualOffset++)
+            {
+                int srcOffset = oldLen == 0 ? 0 : ScaleBoundary(visualOffset, newLen, oldLen);
+                visualToSource.Add(srcCursor + srcOffset);
+            }
+
+            srcCursor += oldLen;
+            outPos += newLen;
+        }
+
+        int sourceEndVisual = outPos;
+        sourceToVisual[srcN] = sourceEndVisual;
+
+        if (suffixRuns is not null)
+        {
+            foreach (InlineRun suffixRun in suffixRuns)
+            {
+                if (string.IsNullOrEmpty(suffixRun.Text))
+                    continue;
+
+                runs.Add(suffixRun);
+                for (int i = 0; i < suffixRun.Text.Length; i++)
+                {
+                    outPos++;
+                    visualToSource.Add(srcN);
+                }
+            }
+        }
+
+        if (visualToSource.Count == 0)
+            visualToSource.Add(srcN);
+        else
+            visualToSource[^1] = srcN;
+
+        return new InlineParseResult(
+            string.Concat(runs.Select(r => r.Text)),
+            runs,
+            visualToSource.ToArray(),
+            sourceToVisual);
+    }
+
+    private IReadOnlyList<InlineRun> PresentRun(InlineRun run)
+    {
+        if (!run.IsFootnoteReference)
+            return [run];
+
+        if (!MarkdownFootnoteHelper.TryParseDefinitionAnchor(run.Href, out string normalizedLabel))
+            return [run];
+
+        if (!_footnoteDisplayNumbers.TryGetValue(normalizedLabel, out int number))
+            return [run];
+
+        return [InlineRun.FootnoteReference(number.ToString(), run.Href, run.Style)];
+    }
+
+    private static int ScaleBoundary(int offset, int fromLength, int toLength)
+    {
+        if (offset <= 0 || toLength <= 0)
+            return 0;
+
+        if (fromLength <= 0)
+            return toLength;
+
+        if (offset >= fromLength)
+            return toLength;
+
+        double scaled = offset * (double)toLength / fromLength;
+        return Math.Clamp((int)Math.Round(scaled, MidpointRounding.AwayFromZero), 0, toLength);
+    }
+
     private static bool SupportsInlineFormatting(MarkdownBlockKind kind) => kind switch
     {
         MarkdownBlockKind.Paragraph => true,
         MarkdownBlockKind.Heading => true,
         MarkdownBlockKind.Quote => true,
         MarkdownBlockKind.List => true,
+        MarkdownBlockKind.FootnoteDefinition => true,
         _ => false
     };
 
@@ -1348,7 +1558,7 @@ public sealed class LayoutEngine
                     continue;
 
                 bool isCode = (run.Style & InlineStyle.Code) != 0;
-                Font runFont = GetOrCreateRunFont(cache, baseFont, run.Style, isCode);
+                Font runFont = GetOrCreateRunFont(cache, baseFont, run.Style, isCode, run.IsFootnoteReference);
 
                 if (isCode)
                     width += InlineCodeChipPadX;
@@ -1408,7 +1618,7 @@ public sealed class LayoutEngine
                     continue;
 
                 bool isCode = (run.Style & InlineStyle.Code) != 0;
-                Font runFont = GetOrCreateRunFont(cache, baseFont, run.Style, isCode);
+                Font runFont = GetOrCreateRunFont(cache, baseFont, run.Style, isCode, run.IsFootnoteReference);
 
                 float advanceWidth = MeasureAdvanceWidth(graphics, run.Text, runFont);
                 if (isCode)
@@ -1437,23 +1647,46 @@ public sealed class LayoutEngine
         return width;
     }
 
-    private Font GetOrCreateRunFont(Dictionary<int, Font> cache, Font baseFont, InlineStyle style, bool isCode)
+    private Font GetOrCreateRunFont(Dictionary<int, Font> cache, Font baseFont, InlineStyle style, bool isCode, bool isFootnoteReference)
     {
-        if (style == InlineStyle.None)
+        if (style == InlineStyle.None && !isFootnoteReference && !isCode)
             return baseFont;
 
         InlineStyle normalized = style & ~InlineStyle.Code;
         int key = ((int)normalized & 0xFF)
                   | (isCode ? 0x100 : 0)
+                  | (isFootnoteReference ? 0x200 : 0)
                   | (((int)baseFont.Style & 0xFF) << 9);
 
         if (cache.TryGetValue(key, out var f))
             return f;
 
         Font seed = isCode ? _monoFont : baseFont;
-        f = InlineMarkdown.CreateStyledFont(seed, normalized);
+        f = CreateRunDisplayFont(seed, normalized, isFootnoteReference);
         cache[key] = f;
         return f;
+    }
+
+    private static Font CreateRunDisplayFont(Font seed, InlineStyle normalized, bool isFootnoteReference)
+    {
+        Font styled = InlineMarkdown.CreateStyledFont(seed, normalized);
+        if (!isFootnoteReference)
+            return styled;
+
+        try
+        {
+            return new Font(
+                styled.FontFamily,
+                Math.Max(1f, styled.Size * FootnoteFontScale),
+                styled.Style,
+                styled.Unit,
+                styled.GdiCharSet,
+                styled.GdiVerticalFont);
+        }
+        finally
+        {
+            styled.Dispose();
+        }
     }
 
     private Font ResolveFont(LineFontRole role) => role switch

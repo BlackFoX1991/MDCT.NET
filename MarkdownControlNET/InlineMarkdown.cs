@@ -19,7 +19,8 @@ public enum InlineRunKind
 {
     Text,
     Image,
-    Link
+    Link,
+    FootnoteReference
 }
 
 public readonly record struct InlineRun
@@ -54,7 +55,8 @@ public readonly record struct InlineRun
     public string Href { get; }
 
     public bool IsImage => Kind == InlineRunKind.Image;
-    public bool IsLink => Kind == InlineRunKind.Link;
+    public bool IsLink => Kind == InlineRunKind.Link || Kind == InlineRunKind.FootnoteReference;
+    public bool IsFootnoteReference => Kind == InlineRunKind.FootnoteReference;
     public int VisualLength => Text.Length;
 
     public static InlineRun Image(string altText, string source, InlineStyle style)
@@ -62,6 +64,9 @@ public readonly record struct InlineRun
 
     public static InlineRun Link(string text, string href, InlineStyle style)
         => new(InlineRunKind.Link, text, style, string.Empty, string.Empty, href);
+
+    public static InlineRun FootnoteReference(string text, string href, InlineStyle style)
+        => new(InlineRunKind.FootnoteReference, text, style, string.Empty, string.Empty, href);
 }
 
 public sealed record InlineParseResult(
@@ -175,6 +180,38 @@ public static class InlineMarkdown
                 sourceToVisual[imageEndExclusive] = outPos;
 
                 i = imageEndExclusive;
+                continue;
+            }
+
+            if (TryReadFootnoteReference(
+                input,
+                i,
+                out int footnoteLabelStart,
+                out int footnoteLabelEnd,
+                out int footnoteEndExclusive,
+                out string footnoteLabel))
+            {
+                FlushRun();
+
+                for (int s = i + 1; s <= footnoteLabelStart; s++)
+                    sourceToVisual[s] = outPos;
+
+                runs.Add(InlineRun.FootnoteReference(
+                    footnoteLabel,
+                    MarkdownFootnoteHelper.BuildDefinitionAnchor(footnoteLabel),
+                    style));
+
+                for (int s = footnoteLabelStart; s < footnoteLabelEnd; s++)
+                {
+                    outPos++;
+                    visualToSource.Add(s + 1);
+                    sourceToVisual[s + 1] = outPos;
+                }
+
+                for (int s = footnoteLabelEnd; s < footnoteEndExclusive; s++)
+                    sourceToVisual[s + 1] = outPos;
+
+                i = footnoteEndExclusive;
                 continue;
             }
 
@@ -342,6 +379,39 @@ public static class InlineMarkdown
         altText = s[(i + 2)..altEnd];
         source = rawSource;
         endExclusive = sourceEnd + 1;
+        return true;
+    }
+
+    private static bool TryReadFootnoteReference(
+        string s,
+        int i,
+        out int labelStart,
+        out int labelEnd,
+        out int endExclusive,
+        out string label)
+    {
+        labelStart = -1;
+        labelEnd = -1;
+        endExclusive = -1;
+        label = string.Empty;
+
+        if (i < 0 || i + 4 > s.Length || s[i] != '[' || s[i + 1] != '^')
+            return false;
+
+        if (IsEscapedAt(s, i))
+            return false;
+
+        int closeBracket = FindUnescapedChar(s, ']', i + 2);
+        if (closeBracket < 0)
+            return false;
+
+        label = s[(i + 2)..closeBracket].Trim();
+        if (string.IsNullOrEmpty(label))
+            return false;
+
+        labelStart = i + 2;
+        labelEnd = closeBracket;
+        endExclusive = closeBracket + 1;
         return true;
     }
 

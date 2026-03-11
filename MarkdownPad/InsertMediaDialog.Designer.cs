@@ -25,6 +25,8 @@ partial class InsertMediaDialog
         targetPanel = new TableLayoutPanel();
         targetTextBox = new TextBox();
         browseButton = new Button();
+        headingLabel = new Label();
+        headingComboBox = new ComboBox();
         statusLabel = new Label();
         previewLabel = new Label();
         previewTextBox = new TextBox();
@@ -51,16 +53,19 @@ partial class InsertMediaDialog
         layoutPanel.Controls.Add(titleTextBox, 1, 1);
         layoutPanel.Controls.Add(targetLabel, 0, 2);
         layoutPanel.Controls.Add(targetPanel, 1, 2);
-        layoutPanel.Controls.Add(statusLabel, 0, 3);
-        layoutPanel.Controls.Add(previewLabel, 0, 4);
-        layoutPanel.Controls.Add(previewTextBox, 1, 4);
-        layoutPanel.Controls.Add(mediaPreviewLabel, 0, 5);
-        layoutPanel.Controls.Add(previewHostPanel, 1, 5);
-        layoutPanel.Controls.Add(buttonPanel, 0, 6);
+        layoutPanel.Controls.Add(headingLabel, 0, 3);
+        layoutPanel.Controls.Add(headingComboBox, 1, 3);
+        layoutPanel.Controls.Add(statusLabel, 0, 4);
+        layoutPanel.Controls.Add(previewLabel, 0, 5);
+        layoutPanel.Controls.Add(previewTextBox, 1, 5);
+        layoutPanel.Controls.Add(mediaPreviewLabel, 0, 6);
+        layoutPanel.Controls.Add(previewHostPanel, 1, 6);
+        layoutPanel.Controls.Add(buttonPanel, 0, 7);
         layoutPanel.Dock = DockStyle.Fill;
         layoutPanel.Location = new Point(10, 9);
         layoutPanel.Name = "layoutPanel";
-        layoutPanel.RowCount = 7;
+        layoutPanel.RowCount = 8;
+        layoutPanel.RowStyles.Add(new RowStyle());
         layoutPanel.RowStyles.Add(new RowStyle());
         layoutPanel.RowStyles.Add(new RowStyle());
         layoutPanel.RowStyles.Add(new RowStyle());
@@ -86,27 +91,27 @@ partial class InsertMediaDialog
         // 
         titleLabel.Anchor = AnchorStyles.Left;
         titleLabel.AutoSize = true;
-        titleLabel.Location = new Point(3, 23);
+        titleLabel.Location = new Point(3, 22);
         titleLabel.Name = "titleLabel";
-        titleLabel.Size = new Size(51, 15);
+        titleLabel.Size = new Size(52, 15);
         titleLabel.TabIndex = 1;
         titleLabel.Text = "Title text";
         // 
         // titleTextBox
         // 
         titleTextBox.Dock = DockStyle.Fill;
-        titleTextBox.Location = new Point(76, 18);
+        titleTextBox.Location = new Point(93, 18);
         titleTextBox.Name = "titleTextBox";
-        titleTextBox.Size = new Size(565, 23);
+        titleTextBox.Size = new Size(548, 23);
         titleTextBox.TabIndex = 0;
         // 
         // targetLabel
         // 
         targetLabel.Anchor = AnchorStyles.Left;
         targetLabel.AutoSize = true;
-        targetLabel.Location = new Point(3, 52);
+        targetLabel.Location = new Point(3, 54);
         targetLabel.Name = "targetLabel";
-        targetLabel.Size = new Size(63, 15);
+        targetLabel.Size = new Size(67, 15);
         targetLabel.TabIndex = 3;
         targetLabel.Text = "Path or link";
         // 
@@ -118,11 +123,11 @@ partial class InsertMediaDialog
         targetPanel.Controls.Add(targetTextBox, 0, 0);
         targetPanel.Controls.Add(browseButton, 1, 0);
         targetPanel.Dock = DockStyle.Fill;
-        targetPanel.Location = new Point(76, 47);
+        targetPanel.Location = new Point(93, 47);
         targetPanel.Name = "targetPanel";
         targetPanel.RowCount = 1;
         targetPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
-        targetPanel.Size = new Size(565, 29);
+        targetPanel.Size = new Size(548, 29);
         targetPanel.TabIndex = 1;
         // 
         // targetTextBox
@@ -130,13 +135,13 @@ partial class InsertMediaDialog
         targetTextBox.Dock = DockStyle.Fill;
         targetTextBox.Location = new Point(3, 3);
         targetTextBox.Name = "targetTextBox";
-        targetTextBox.Size = new Size(478, 23);
+        targetTextBox.Size = new Size(461, 23);
         targetTextBox.TabIndex = 1;
         // 
         // browseButton
         // 
         browseButton.AutoSize = true;
-        browseButton.Location = new Point(487, 2);
+        browseButton.Location = new Point(470, 2);
         browseButton.Margin = new Padding(3, 2, 3, 2);
         browseButton.Name = "browseButton";
         browseButton.Size = new Size(75, 25);
@@ -144,46 +149,68 @@ partial class InsertMediaDialog
         browseButton.Text = "Browse...";
         browseButton.UseVisualStyleBackColor = true;
         // 
+        // headingLabel
+        // 
+        headingLabel.Anchor = AnchorStyles.Left;
+        headingLabel.AutoSize = true;
+        headingLabel.Location = new Point(3, 86);
+        headingLabel.Name = "headingLabel";
+        headingLabel.Size = new Size(52, 15);
+        headingLabel.TabIndex = 4;
+        headingLabel.Text = "Heading";
+        headingLabel.Visible = false;
+        // 
+        // headingComboBox
+        // 
+        headingComboBox.Dock = DockStyle.Fill;
+        headingComboBox.DropDownStyle = ComboBoxStyle.DropDownList;
+        headingComboBox.FormattingEnabled = true;
+        headingComboBox.Location = new Point(93, 82);
+        headingComboBox.Name = "headingComboBox";
+        headingComboBox.Size = new Size(548, 23);
+        headingComboBox.TabIndex = 3;
+        headingComboBox.Visible = false;
+        // 
         // statusLabel
         // 
         statusLabel.AutoEllipsis = true;
         layoutPanel.SetColumnSpan(statusLabel, 2);
         statusLabel.Dock = DockStyle.Fill;
-        statusLabel.Location = new Point(3, 79);
+        statusLabel.Location = new Point(3, 108);
         statusLabel.Name = "statusLabel";
         statusLabel.Size = new Size(638, 18);
-        statusLabel.TabIndex = 4;
+        statusLabel.TabIndex = 5;
         statusLabel.Text = "Enter a path or URL.";
         // 
         // previewLabel
         // 
         previewLabel.Anchor = AnchorStyles.Left;
         previewLabel.AutoSize = true;
-        previewLabel.Location = new Point(3, 135);
+        previewLabel.Location = new Point(3, 164);
         previewLabel.Name = "previewLabel";
-        previewLabel.Size = new Size(49, 15);
-        previewLabel.TabIndex = 5;
+        previewLabel.Size = new Size(48, 15);
+        previewLabel.TabIndex = 6;
         previewLabel.Text = "Preview";
         // 
         // previewTextBox
         // 
         previewTextBox.Dock = DockStyle.Fill;
         previewTextBox.Font = new Font("Consolas", 9F, FontStyle.Regular, GraphicsUnit.Point, 0);
-        previewTextBox.Location = new Point(76, 100);
+        previewTextBox.Location = new Point(93, 129);
         previewTextBox.Multiline = true;
         previewTextBox.Name = "previewTextBox";
         previewTextBox.ReadOnly = true;
         previewTextBox.ScrollBars = ScrollBars.Vertical;
-        previewTextBox.Size = new Size(565, 86);
-        previewTextBox.TabIndex = 3;
+        previewTextBox.Size = new Size(548, 86);
+        previewTextBox.TabIndex = 4;
         // 
         // mediaPreviewLabel
         // 
         mediaPreviewLabel.Anchor = AnchorStyles.Left;
         mediaPreviewLabel.AutoSize = true;
-        mediaPreviewLabel.Location = new Point(3, 251);
+        mediaPreviewLabel.Location = new Point(3, 295);
         mediaPreviewLabel.Name = "mediaPreviewLabel";
-        mediaPreviewLabel.Size = new Size(80, 15);
+        mediaPreviewLabel.Size = new Size(84, 15);
         mediaPreviewLabel.TabIndex = 7;
         mediaPreviewLabel.Text = "Image preview";
         // 
@@ -193,10 +220,10 @@ partial class InsertMediaDialog
         previewHostPanel.BorderStyle = BorderStyle.FixedSingle;
         previewHostPanel.Controls.Add(previewPictureBox);
         previewHostPanel.Dock = DockStyle.Fill;
-        previewHostPanel.Location = new Point(76, 192);
+        previewHostPanel.Location = new Point(93, 221);
         previewHostPanel.Name = "previewHostPanel";
         previewHostPanel.Padding = new Padding(10);
-        previewHostPanel.Size = new Size(565, 164);
+        previewHostPanel.Size = new Size(548, 164);
         previewHostPanel.TabIndex = 8;
         // 
         // previewPictureBox
@@ -205,7 +232,7 @@ partial class InsertMediaDialog
         previewPictureBox.Dock = DockStyle.Fill;
         previewPictureBox.Location = new Point(10, 10);
         previewPictureBox.Name = "previewPictureBox";
-        previewPictureBox.Size = new Size(543, 142);
+        previewPictureBox.Size = new Size(526, 142);
         previewPictureBox.SizeMode = PictureBoxSizeMode.Zoom;
         previewPictureBox.TabIndex = 0;
         previewPictureBox.TabStop = false;
@@ -218,10 +245,10 @@ partial class InsertMediaDialog
         buttonPanel.Controls.Add(insertButton);
         buttonPanel.Dock = DockStyle.Fill;
         buttonPanel.FlowDirection = FlowDirection.RightToLeft;
-        buttonPanel.Location = new Point(3, 362);
+        buttonPanel.Location = new Point(3, 391);
         buttonPanel.Name = "buttonPanel";
         buttonPanel.Size = new Size(638, 25);
-        buttonPanel.TabIndex = 4;
+        buttonPanel.TabIndex = 5;
         buttonPanel.WrapContents = false;
         // 
         // cancelButton
@@ -257,7 +284,7 @@ partial class InsertMediaDialog
         ClientSize = new Size(664, 408);
         Controls.Add(layoutPanel);
         FormBorderStyle = FormBorderStyle.FixedDialog;
-        
+        Icon = (Icon)resources.GetObject("$this.Icon");
         MaximizeBox = false;
         MinimizeBox = false;
         Name = "InsertMediaDialog";
@@ -286,6 +313,8 @@ partial class InsertMediaDialog
     private TableLayoutPanel targetPanel;
     private TextBox targetTextBox;
     private Button browseButton;
+    private Label headingLabel;
+    private ComboBox headingComboBox;
     private Label statusLabel;
     private Label previewLabel;
     private TextBox previewTextBox;

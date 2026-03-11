@@ -267,6 +267,8 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
     private Color _inlineCodeBorder = Color.FromArgb(210, 216, 224);
     private const int InlineCodePadX = 4;
     private const int InlineCodePadY = 1;
+    private const int FootnoteRaiseY = 4;
+    private const float FootnoteFontScale = 0.82f;
 
     private EditorThemeMode _themeMode = EditorThemeMode.System;
     private bool _isDarkThemeEffective;
@@ -793,6 +795,26 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         ApplyDocumentEdit(() => _state.InsertText(_doc, normalized));
     }
 
+    public bool NavigateToMarkdownAnchor(string anchor)
+    {
+        if (TryFindFootnoteDefinitionForAnchor(anchor, out FootnoteDefinitionBlock footnote))
+        {
+            FootnoteDefinitionLine targetLine = footnote.Lines.Count > 0
+                ? footnote.Lines[0]
+                : new FootnoteDefinitionLine(footnote.StartLine, 0, -1, 0, true);
+
+            int sourceLine = Math.Clamp(targetLine.SourceLine, 0, _doc.LineCount - 1);
+            string sourceText = _doc.GetLine(sourceLine);
+            int targetColumn = Math.Clamp(targetLine.ContentStartColumn, 0, sourceText.Length);
+            return NavigateToSourcePosition(sourceLine, targetColumn);
+        }
+
+        if (TryFindFootnoteReferenceForAnchor(anchor, out MarkdownPosition referencePosition))
+            return NavigateToSourcePosition(referencePosition.Line, referencePosition.Column);
+
+        return NavigateToHeadingAnchor(anchor);
+    }
+
     public bool NavigateToHeadingAnchor(string anchor)
     {
         if (!TryFindHeadingForAnchor(anchor, out HeadingBlock heading))
@@ -800,8 +822,12 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
 
         string sourceLine = _doc.GetLine(heading.Line);
         int targetColumn = Math.Clamp(GetHeadingMarkerLength(sourceLine), 0, sourceLine.Length);
+        return NavigateToSourcePosition(heading.Line, targetColumn);
+    }
 
-        _state.SetCaret(new MarkdownPosition(heading.Line, targetColumn), shift: false, _doc);
+    private bool NavigateToSourcePosition(int line, int column)
+    {
+        _state.SetCaret(new MarkdownPosition(line, column), shift: false, _doc);
         RefreshLayoutForCaretContext(force: true);
         ResetCaretBlink();
         EnsureCaretVisible();
@@ -1453,30 +1479,48 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
     {
         heading = null!;
 
-        if (!TryParseHeadingAnchor(anchor, out int? requestedLevel, out string lookupText, out string lookupSlug))
+        if (!MarkdownAnchorHelper.TryParseHeadingAnchor(anchor, out int? requestedLevel, out string lookupText, out string lookupSlug))
             return false;
 
-        var slugCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        MarkdownHeadingAnchor? fallbackHeading = null;
 
-        foreach (HeadingBlock candidate in _doc.Blocks.OfType<HeadingBlock>())
+        foreach (MarkdownHeadingAnchor candidate in MarkdownAnchorHelper.BuildHeadingAnchors(_doc.Blocks.OfType<HeadingBlock>()))
         {
-            string baseSlug = NormalizeHeadingAnchorSlug(candidate.Text);
-            if (string.IsNullOrEmpty(baseSlug))
-                continue;
-
-            int occurrence = slugCounts.TryGetValue(baseSlug, out int seen) ? seen + 1 : 0;
-            slugCounts[baseSlug] = occurrence;
-
-            string effectiveSlug = occurrence == 0 ? baseSlug : $"{baseSlug}-{occurrence}";
-            if (requestedLevel.HasValue && candidate.Level != requestedLevel.Value)
-                continue;
-
-            string candidateText = NormalizeHeadingAnchorText(candidate.Text);
+            string candidateText = MarkdownAnchorHelper.NormalizeHeadingText(candidate.Heading.Text);
             if (string.Equals(candidateText, lookupText, StringComparison.OrdinalIgnoreCase) ||
-                string.Equals(baseSlug, lookupSlug, StringComparison.OrdinalIgnoreCase) ||
-                string.Equals(effectiveSlug, lookupSlug, StringComparison.OrdinalIgnoreCase))
+                string.Equals(candidate.Slug, lookupSlug, StringComparison.OrdinalIgnoreCase))
             {
-                heading = candidate;
+                if (!requestedLevel.HasValue || candidate.Heading.Level == requestedLevel.Value)
+                {
+                    heading = candidate.Heading;
+                    return true;
+                }
+
+                fallbackHeading ??= candidate;
+            }
+        }
+
+        if (fallbackHeading.HasValue)
+        {
+            heading = fallbackHeading.Value.Heading;
+            return true;
+        }
+
+        return false;
+    }
+
+    private bool TryFindFootnoteDefinitionForAnchor(string anchor, out FootnoteDefinitionBlock block)
+    {
+        block = null!;
+
+        if (!MarkdownFootnoteHelper.TryParseDefinitionAnchor(anchor, out string normalizedLabel))
+            return false;
+
+        foreach (FootnoteDefinitionBlock candidate in _doc.Blocks.OfType<FootnoteDefinitionBlock>())
+        {
+            if (string.Equals(candidate.NormalizedLabel, normalizedLabel, StringComparison.OrdinalIgnoreCase))
+            {
+                block = candidate;
                 return true;
             }
         }
@@ -1484,68 +1528,16 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         return false;
     }
 
-    private static bool TryParseHeadingAnchor(
-        string anchor,
-        out int? requestedLevel,
-        out string lookupText,
-        out string lookupSlug)
+    private bool TryFindFootnoteReferenceForAnchor(string anchor, out MarkdownPosition position)
     {
-        requestedLevel = null;
-        lookupText = string.Empty;
-        lookupSlug = string.Empty;
+        position = default;
 
-        string raw = (anchor ?? string.Empty).Trim();
-        if (string.IsNullOrEmpty(raw))
+        if (!MarkdownFootnoteHelper.TryParseReferenceAnchor(anchor, out string normalizedLabel, out int occurrence))
             return false;
 
-        if (raw[0] == '#')
-        {
-            int hashCount = 0;
-            while (hashCount < raw.Length && raw[hashCount] == '#')
-                hashCount++;
-
-            requestedLevel = hashCount;
-            raw = raw[hashCount..];
-        }
-
-        raw = raw.Trim();
-        if (string.IsNullOrEmpty(raw))
-            return false;
-
-        lookupText = NormalizeHeadingAnchorText(raw);
-        lookupSlug = NormalizeHeadingAnchorSlug(raw);
-        return lookupText.Length > 0 || lookupSlug.Length > 0;
+        MarkdownFootnoteIndex index = MarkdownFootnoteHelper.BuildIndex(_doc.Lines);
+        return index.TryGetReferencePosition(normalizedLabel, occurrence, out position);
     }
-
-    private static string NormalizeHeadingAnchorText(string value)
-    {
-        if (string.IsNullOrWhiteSpace(value))
-            return string.Empty;
-
-        var sb = new StringBuilder(value.Length);
-        bool pendingSeparator = false;
-
-        foreach (char ch in value.Trim())
-        {
-            if (char.IsLetterOrDigit(ch))
-            {
-                if (pendingSeparator && sb.Length > 0)
-                    sb.Append(' ');
-
-                sb.Append(char.ToLowerInvariant(ch));
-                pendingSeparator = false;
-                continue;
-            }
-
-            if (char.IsWhiteSpace(ch) || ch is '-' or '_' or '.')
-                pendingSeparator = sb.Length > 0;
-        }
-
-        return sb.ToString();
-    }
-
-    private static string NormalizeHeadingAnchorSlug(string value)
-        => NormalizeHeadingAnchorText(value).Replace(' ', '-');
 
     private bool TryBuildLinkHit(Point contentPoint, out LinkHit hit)
     {
@@ -1663,7 +1655,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
             return 0;
 
         bool isCode = (run.Style & InlineStyle.Code) != 0;
-        Font runFont = GetOrCreateInlineFont(cache, baseFont, run.Style, isCode, _monoFont);
+        Font runFont = GetOrCreateInlineFont(cache, baseFont, run.Style, isCode, run.IsFootnoteReference, _monoFont);
         int width = MeasureWidth(run.Text, runFont);
 
         if (isCode)
@@ -2293,7 +2285,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
                 return false;
 
             // Für diese Blöcke Source zeigen, solange Caret im Block ist
-            if (b is HeadingBlock or QuoteBlock or ListBlock || b.Kind == MarkdownBlockKind.HorizontalRule)
+            if (b is HeadingBlock or QuoteBlock or ListBlock or FootnoteDefinitionBlock || b.Kind == MarkdownBlockKind.HorizontalRule)
             {
                 startLine = Math.Max(0, b.StartLine);
                 endLine = Math.Min(_doc.LineCount - 1, b.EndLine);
@@ -3003,6 +2995,14 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         g.DrawLine(pen, location.X, underlineY, location.X + Math.Max(1, width), underlineY);
     }
 
+    private void DrawFootnoteReferenceText(Graphics g, string text, Font font, Point location)
+    {
+        if (string.IsNullOrEmpty(text))
+            return;
+
+        DrawTextGdiPlus(g, text, font, new Point(location.X, location.Y - FootnoteRaiseY), _linkColor);
+    }
+
     private Size? TryGetCachedImageSize(string source)
     {
         ImageCacheEntry entry = GetOrQueueImage(source);
@@ -3313,7 +3313,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
                 if (string.IsNullOrEmpty(run.Text)) continue;
 
                 bool isCode = (run.Style & InlineStyle.Code) != 0;
-                Font f = GetOrCreateTableRunFont(cache, baseFont, run.Style, isCode);
+                Font f = GetOrCreateTableRunFont(cache, baseFont, run.Style, isCode, run.IsFootnoteReference);
 
                 int w = MeasureWidth(g, run.Text, f);
                 if (isCode) w += InlineCodePadX * 2;
@@ -3329,19 +3329,23 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         return width;
     }
 
-    private Font GetOrCreateTableRunFont(Dictionary<int, Font> cache, Font baseFont, InlineStyle style, bool isCode)
+    private Font GetOrCreateTableRunFont(Dictionary<int, Font> cache, Font baseFont, InlineStyle style, bool isCode, bool isFootnoteReference)
     {
+        if (style == InlineStyle.None && !isFootnoteReference && !isCode)
+            return baseFont;
+
         InlineStyle normalized = style & ~InlineStyle.Code;
 
         int key = ((int)normalized & 0xFF)
                   | (isCode ? 0x100 : 0)
+                  | (isFootnoteReference ? 0x200 : 0)
                   | (((int)baseFont.Style & 0xFF) << 9);
 
         if (cache.TryGetValue(key, out var f))
             return f;
 
         Font seed = isCode ? _monoFont : baseFont;
-        f = InlineMarkdown.CreateStyledFont(seed, normalized);
+        f = CreateRunDisplayFont(seed, normalized, isFootnoteReference);
         cache[key] = f;
         return f;
     }
@@ -3379,7 +3383,14 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
                 if (string.IsNullOrEmpty(run.Text)) continue;
 
                 bool isCode = (run.Style & InlineStyle.Code) != 0;
-                Font runFont = GetOrCreateTableRunFont(cache, baseFont, run.Style, isCode);
+                Font runFont = GetOrCreateTableRunFont(cache, baseFont, run.Style, isCode, run.IsFootnoteReference);
+
+                if (run.IsFootnoteReference)
+                {
+                    DrawFootnoteReferenceText(g, run.Text, runFont, new Point(x, start.Y));
+                    x += MeasureWidth(g, run.Text, runFont);
+                    continue;
+                }
 
                 if (run.IsLink)
                 {
@@ -4525,21 +4536,47 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
     private Font GetRenderFont(LayoutLine line)
         => line.Kind == MarkdownBlockKind.Heading ? GetHeadingFontCached(line.HeadingLevel) : GetFont(line.FontRole);
 
-    private static Font GetOrCreateInlineFont(Dictionary<int, Font> cache, Font baseFont, InlineStyle style, bool isCode, Font monoFont)
+    private static Font GetOrCreateInlineFont(Dictionary<int, Font> cache, Font baseFont, InlineStyle style, bool isCode, bool isFootnoteReference, Font monoFont)
     {
+        if (style == InlineStyle.None && !isFootnoteReference && !isCode)
+            return baseFont;
+
         InlineStyle normalized = style & ~InlineStyle.Code;
 
         int key = ((int)normalized & 0xFF)
                   | (isCode ? 0x100 : 0)
+                  | (isFootnoteReference ? 0x200 : 0)
                   | (((int)baseFont.Style & 0xFF) << 9);
 
         if (cache.TryGetValue(key, out var f))
             return f;
 
         Font seed = isCode ? monoFont : baseFont;
-        f = InlineMarkdown.CreateStyledFont(seed, normalized);
+        f = CreateRunDisplayFont(seed, normalized, isFootnoteReference);
         cache[key] = f;
         return f;
+    }
+
+    private static Font CreateRunDisplayFont(Font seed, InlineStyle normalized, bool isFootnoteReference)
+    {
+        Font styled = InlineMarkdown.CreateStyledFont(seed, normalized);
+        if (!isFootnoteReference)
+            return styled;
+
+        try
+        {
+            return new Font(
+                styled.FontFamily,
+                Math.Max(1f, styled.Size * FootnoteFontScale),
+                styled.Style,
+                styled.Unit,
+                styled.GdiCharSet,
+                styled.GdiVerticalFont);
+        }
+        finally
+        {
+            styled.Dispose();
+        }
     }
 
     private void DrawInlineRuns(Graphics g, LayoutLine line, Point contentTextStart)
@@ -4577,7 +4614,15 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
                 if (string.IsNullOrEmpty(run.Text)) continue;
 
                 bool isCode = (run.Style & InlineStyle.Code) != 0;
-                Font runFont = GetOrCreateInlineFont(cache, baseFont, run.Style, isCode, _monoFont);
+                Font runFont = GetOrCreateInlineFont(cache, baseFont, run.Style, isCode, run.IsFootnoteReference, _monoFont);
+
+                if (run.IsFootnoteReference)
+                {
+                    int runTextY = line.Bounds.Top + Math.Max(0, (line.Bounds.Height - MeasureHeight(g, runFont)) / 2);
+                    DrawFootnoteReferenceText(g, run.Text, runFont, new Point(x, runTextY));
+                    x += MeasureWidth(g, run.Text, runFont);
+                    continue;
+                }
 
                 if (run.IsLink)
                 {
@@ -4676,7 +4721,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
                     continue;
 
                 bool isCode = (run.Style & InlineStyle.Code) != 0;
-                Font runFont = GetOrCreateInlineFont(cache, baseFont, run.Style, isCode, _monoFont);
+                Font runFont = GetOrCreateInlineFont(cache, baseFont, run.Style, isCode, run.IsFootnoteReference, _monoFont);
 
                 if (isCode)
                     width += InlineCodePadX;
@@ -4735,7 +4780,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
                     continue;
 
                 bool isCode = (run.Style & InlineStyle.Code) != 0;
-                Font runFont = GetOrCreateInlineFont(cache, baseFont, run.Style, isCode, _monoFont);
+                Font runFont = GetOrCreateInlineFont(cache, baseFont, run.Style, isCode, run.IsFootnoteReference, _monoFont);
 
                 float advanceWidth = MeasureAdvanceWidth(g, run.Text, runFont);
                 if (isCode)

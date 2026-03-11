@@ -28,16 +28,24 @@ internal sealed partial class InsertMediaDialog : Form
 
     private readonly InsertMediaKind _kind;
     private readonly string? _documentBasePath;
+    private readonly IReadOnlyList<MarkdownHeadingAnchor> _headingAnchors;
     private Image? _previewImage;
     private int _previewGeneration;
 
-    public InsertMediaDialog(InsertMediaKind kind, string? documentBasePath, string? initialTitle = null, string? initialTarget = null)
+    public InsertMediaDialog(
+        InsertMediaKind kind,
+        string? documentBasePath,
+        string? initialTitle = null,
+        string? initialTarget = null,
+        string? documentMarkdown = null)
     {
         _kind = kind;
         _documentBasePath = string.IsNullOrWhiteSpace(documentBasePath) ? null : Path.GetFullPath(documentBasePath);
+        _headingAnchors = BuildHeadingAnchors(documentMarkdown);
 
         InitializeComponent();
         ConfigureAppearance();
+        PopulateHeadingTargets();
 
         titleTextBox.Text = initialTitle ?? string.Empty;
         targetTextBox.Text = initialTarget ?? string.Empty;
@@ -91,18 +99,28 @@ internal sealed partial class InsertMediaDialog : Form
             ? "Insert a web link or a local file. Relative paths are based on the active markdown document."
             : "Insert a local or remote image. Relative paths are based on the active markdown document.";
 
+        bool showHeadingTargets = _kind == InsertMediaKind.Link && _headingAnchors.Count > 0;
+        headingLabel.Visible = showHeadingTargets;
+        headingComboBox.Visible = showHeadingTargets;
+        layoutPanel.RowStyles[3].SizeType = SizeType.Absolute;
+        layoutPanel.RowStyles[3].Height = showHeadingTargets ? 34 : 0;
+
         if (_kind == InsertMediaKind.Link)
         {
+            if (showHeadingTargets)
+                infoLabel.Text += " You can also pick a heading from the current document.";
+
             mediaPreviewLabel.Visible = false;
             previewHostPanel.Visible = false;
-            layoutPanel.RowStyles[5].Height = 0;
-            layoutPanel.RowStyles[5].SizeType = SizeType.Absolute;
-            ClientSize = new Size(ClientSize.Width, 244);
+            layoutPanel.RowStyles[6].Height = 0;
+            layoutPanel.RowStyles[6].SizeType = SizeType.Absolute;
+            ClientSize = new Size(ClientSize.Width, showHeadingTargets ? 278 : 244);
         }
 
         titleTextBox.TextChanged += (_, _) => QueueRefresh();
         targetTextBox.TextChanged += (_, _) => QueueRefresh();
         browseButton.Click += (_, _) => BrowseForTarget();
+        headingComboBox.SelectionChangeCommitted += HeadingComboBox_SelectionChangeCommitted;
     }
 
     private void BrowseForTarget()
@@ -130,6 +148,31 @@ internal sealed partial class InsertMediaDialog : Form
     {
         int generation = ++_previewGeneration;
         _ = RefreshStateAsync(generation);
+    }
+
+    private void PopulateHeadingTargets()
+    {
+        headingComboBox.Items.Clear();
+
+        foreach (MarkdownHeadingAnchor anchor in _headingAnchors)
+        {
+            headingComboBox.Items.Add(new HeadingTargetOption(
+                $"{new string('#', Math.Clamp(anchor.Heading.Level, 1, 6))} {anchor.Heading.Text}",
+                anchor.Target,
+                anchor.Heading.Text));
+        }
+
+        headingComboBox.SelectedIndex = -1;
+    }
+
+    private void HeadingComboBox_SelectionChangeCommitted(object? sender, EventArgs e)
+    {
+        if (headingComboBox.SelectedItem is not HeadingTargetOption option)
+            return;
+
+        targetTextBox.Text = option.Target;
+        if (string.IsNullOrWhiteSpace(titleTextBox.Text))
+            titleTextBox.Text = option.Title;
     }
 
     private async Task RefreshStateAsync(int generation)
@@ -347,6 +390,16 @@ internal sealed partial class InsertMediaDialog : Form
     private static string ResolveLinkText(string title, string target)
         => string.IsNullOrWhiteSpace(title) ? target : title;
 
+    private static IReadOnlyList<MarkdownHeadingAnchor> BuildHeadingAnchors(string? documentMarkdown)
+    {
+        if (string.IsNullOrWhiteSpace(documentMarkdown))
+            return Array.Empty<MarkdownHeadingAnchor>();
+
+        string normalized = documentMarkdown.Replace("\r\n", "\n", StringComparison.Ordinal).Replace('\r', '\n');
+        IReadOnlyList<MarkdownBlock> blocks = MarkdownParser.Parse(normalized.Split('\n'));
+        return MarkdownAnchorHelper.BuildHeadingAnchors(blocks.OfType<HeadingBlock>());
+    }
+
     private sealed record TargetAnalysis(
         string RawTarget,
         string ResolvedTarget,
@@ -355,4 +408,9 @@ internal sealed partial class InsertMediaDialog : Form
         Color StatusColor,
         bool CanAttemptPreview,
         string PreviewSourceHint = "");
+
+    private sealed record HeadingTargetOption(string Display, string Target, string Title)
+    {
+        public override string ToString() => Display;
+    }
 }

@@ -62,11 +62,12 @@ public sealed class padTab : TabPage
 
     public void LoadDocument(string markdown, string? filePath)
     {
-        Editor.Markdown = markdown;
-        FilePath = string.IsNullOrWhiteSpace(filePath) ? null : Path.GetFullPath(filePath);
-        Editor.DocumentBasePath = FilePath is null ? null : Path.GetDirectoryName(FilePath);
-        Modified = false;
-        UpdatePresentation();
+        ApplyDocumentState(markdown, filePath, modified: false);
+    }
+
+    public void RestoreDocument(string markdown, string? filePath, bool modified)
+    {
+        ApplyDocumentState(markdown, filePath, modified);
     }
 
     public void MarkSaved(string? filePath = null)
@@ -76,6 +77,15 @@ public sealed class padTab : TabPage
 
         Editor.DocumentBasePath = FilePath is null ? null : Path.GetDirectoryName(FilePath);
         Modified = false;
+        UpdatePresentation();
+    }
+
+    private void ApplyDocumentState(string markdown, string? filePath, bool modified)
+    {
+        Editor.Markdown = markdown;
+        FilePath = string.IsNullOrWhiteSpace(filePath) ? null : Path.GetFullPath(filePath);
+        Editor.DocumentBasePath = FilePath is null ? null : Path.GetDirectoryName(FilePath);
+        Modified = modified;
         UpdatePresentation();
     }
 

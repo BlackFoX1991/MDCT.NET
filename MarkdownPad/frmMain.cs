@@ -7,9 +7,17 @@ namespace MarkdownPad;
 public partial class frmMain : Form
 {
     private const string AppTitle = "MarkdownPad";
+    private const int MaxRecentFiles = 12;
 
     private readonly List<string> _printLines = [];
     private readonly Queue<string> _pendingPrintSegments = [];
+    private readonly List<string> _recentFiles = [];
+    private readonly ToolStripMenuItem _recentToolStripMenuItem = new() { Name = "recentToolStripMenuItem", Text = "Recent..." };
+    private readonly ToolStripButton _cutToolStripButton = CreateToolbarTextButton("Cut", "Cut");
+    private readonly ToolStripButton _copyToolStripButton = CreateToolbarTextButton("Copy", "Copy");
+    private readonly ToolStripButton _pasteToolStripButton = CreateToolbarTextButton("Paste", "Paste");
+    private readonly ToolStripButton _selectAllToolStripButton = CreateToolbarTextButton("Select All", "Select All");
+    private readonly ToolStripSeparator _editToolStripSeparator = new();
 
     private EditorThemeMode _themeMode = EditorThemeMode.System;
     private string? _lastDirectory;
@@ -25,13 +33,14 @@ public partial class frmMain : Form
         Text = AppTitle;
         KeyPreview = true;
 
+        ConfigureDynamicUi();
         ConfigureMenus();
         ConfigureToolbar();
         ConfigurePrinting();
         ConfigureTabControl();
         ConfigureDragAndDrop();
 
-        CreateNewTab();
+        RestoreApplicationState();
         UpdateUiState();
     }
 
@@ -67,6 +76,7 @@ public partial class frmMain : Form
     {
         newToolStripMenuItem.Click += (_, _) => CreateNewTab();
         openToolStripMenuItem.Click += (_, _) => OpenDocuments();
+        _recentToolStripMenuItem.DropDownOpening += (_, _) => PopulateRecentMenu();
         saveToolStripMenuItem.Click += (_, _) => SaveActiveDocument();
         saveAsToolStripMenuItem.Click += (_, _) => SaveActiveDocument(forceSaveAs: true);
         saveAllToolStripMenuItem.Click += (_, _) => SaveAllDocuments();
@@ -110,6 +120,10 @@ public partial class frmMain : Form
         saveAllToolStripButton.Click += (_, _) => SaveAllDocuments();
         undoToolStripButton.Click += (_, _) => ExecuteOnActiveEditor(editor => editor.UndoCommand());
         redoToolStripButton.Click += (_, _) => ExecuteOnActiveEditor(editor => editor.RedoCommand());
+        _cutToolStripButton.Click += (_, _) => ExecuteOnActiveEditor(editor => editor.CutCommand());
+        _copyToolStripButton.Click += (_, _) => ExecuteOnActiveEditor(editor => editor.CopyCommand());
+        _pasteToolStripButton.Click += (_, _) => ExecuteOnActiveEditor(editor => editor.PasteCommand());
+        _selectAllToolStripButton.Click += (_, _) => ExecuteOnActiveEditor(editor => editor.SelectAllCommand());
         findToolStripButton.Click += (_, _) => ShowFindDialog();
         findNextToolStripButton.Click += (_, _) => FindNextInActiveDocument();
         linkToolStripButton.Click += (_, _) => ShowInsertLinkDialog();
@@ -165,9 +179,231 @@ public partial class frmMain : Form
         FormClosing += frmMain_FormClosing;
     }
 
-    private padTab CreateNewTab(bool select = true)
+    private void RestoreApplicationState()
     {
-        var tab = new padTab($"Untitled {_untitledCounter++}", _themeMode);
+        MarkdownPadApplicationState state = ApplicationStateStore.Load();
+
+        _themeMode = state.ThemeMode;
+        _lastDirectory = string.IsNullOrWhiteSpace(state.LastDirectory) ? null : state.LastDirectory;
+        _untitledCounter = Math.Max(1, state.NextUntitledCounter);
+
+        _recentFiles.Clear();
+        foreach (string file in NormalizeRecentFiles(state.RecentFiles).Take(MaxRecentFiles))
+            _recentFiles.Add(file);
+
+        ApplyWindowPlacement(state.Window);
+
+        if (state.OpenDocuments.Count == 0)
+        {
+            CreateNewTab();
+            UpdateThemeMenuChecks();
+            return;
+        }
+
+        foreach (MarkdownPadSessionDocument document in state.OpenDocuments)
+        {
+            string? restoredName = string.IsNullOrWhiteSpace(document.FilePath)
+                ? document.DefaultName
+                : Path.GetFileName(document.FilePath);
+
+            padTab tab = CreateNewTab(select: false, defaultName: restoredName);
+            tab.RestoreDocument(document.Markdown ?? string.Empty, document.FilePath, document.Modified);
+        }
+
+        if (tabControl1.TabPages.Count == 0)
+        {
+            CreateNewTab();
+        }
+        else
+        {
+            int selectedIndex = Math.Clamp(state.SelectedTabIndex, 0, tabControl1.TabPages.Count - 1);
+            tabControl1.SelectedIndex = selectedIndex;
+
+            if (ActiveTab is not null)
+                FocusEditor(ActiveTab);
+        }
+
+        UpdateThemeMenuChecks();
+        SetStatusMessage("Session restored");
+    }
+
+    private void ApplyWindowPlacement(WindowPlacementState placement)
+    {
+        Rectangle bounds = new(placement.Left, placement.Top, placement.Width, placement.Height);
+        if (bounds.Width < 600 || bounds.Height < 360 || !IsUsableWindowBounds(bounds))
+            return;
+
+        StartPosition = FormStartPosition.Manual;
+        Bounds = bounds;
+        WindowState = placement.WindowState == FormWindowState.Maximized
+            ? FormWindowState.Maximized
+            : FormWindowState.Normal;
+    }
+
+    private static bool IsUsableWindowBounds(Rectangle bounds)
+    {
+        return Screen.AllScreens.Any(screen => screen.WorkingArea.IntersectsWith(bounds));
+    }
+
+    private MarkdownPadApplicationState CaptureApplicationState()
+    {
+        return new MarkdownPadApplicationState
+        {
+            Window = CaptureWindowPlacement(),
+            ThemeMode = _themeMode,
+            LastDirectory = _lastDirectory,
+            SelectedTabIndex = Math.Max(0, tabControl1.SelectedIndex),
+            NextUntitledCounter = Math.Max(1, _untitledCounter),
+            RecentFiles = [.. _recentFiles],
+            OpenDocuments = [.. OpenTabs.Select(CaptureSessionDocument)]
+        };
+    }
+
+    private WindowPlacementState CaptureWindowPlacement()
+    {
+        Rectangle bounds = WindowState == FormWindowState.Normal ? Bounds : RestoreBounds;
+        FormWindowState state = WindowState == FormWindowState.Maximized
+            ? FormWindowState.Maximized
+            : FormWindowState.Normal;
+
+        return new WindowPlacementState
+        {
+            Left = bounds.Left,
+            Top = bounds.Top,
+            Width = Math.Max(640, bounds.Width),
+            Height = Math.Max(400, bounds.Height),
+            WindowState = state
+        };
+    }
+
+    private static MarkdownPadSessionDocument CaptureSessionDocument(padTab tab)
+    {
+        return new MarkdownPadSessionDocument
+        {
+            FilePath = tab.FilePath,
+            DefaultName = tab.IsUntitled ? tab.DocumentName : null,
+            Markdown = tab.Editor.Markdown,
+            Modified = tab.Modified
+        };
+    }
+
+    private void PopulateRecentMenu()
+    {
+        _recentToolStripMenuItem.DropDownItems.Clear();
+
+        if (_recentFiles.Count == 0)
+        {
+            _recentToolStripMenuItem.DropDownItems.Add(new ToolStripMenuItem("(Empty)") { Enabled = false });
+            return;
+        }
+
+        for (int i = 0; i < _recentFiles.Count; i++)
+        {
+            string path = _recentFiles[i];
+            var item = new ToolStripMenuItem
+            {
+                Text = BuildRecentMenuText(path, i),
+                ToolTipText = path,
+                Tag = path
+            };
+
+            item.Click += RecentFileMenuItem_Click;
+            _recentToolStripMenuItem.DropDownItems.Add(item);
+        }
+
+        _recentToolStripMenuItem.DropDownItems.Add(new ToolStripSeparator());
+
+        var clearItem = new ToolStripMenuItem("Clear Recent")
+        {
+            Enabled = _recentFiles.Count > 0
+        };
+        clearItem.Click += (_, _) =>
+        {
+            _recentFiles.Clear();
+            SetStatusMessage("Recent files cleared");
+            UpdateUiState();
+        };
+
+        _recentToolStripMenuItem.DropDownItems.Add(clearItem);
+    }
+
+    private static string BuildRecentMenuText(string path, int index)
+    {
+        string fileName = EscapeMenuText(Path.GetFileName(path));
+        string directory = EscapeMenuText(Path.GetDirectoryName(path) ?? string.Empty);
+        string prefix = index < 9 ? $"&{index + 1} " : string.Empty;
+        return $"{prefix}{fileName}  ({directory})";
+    }
+
+    private static string EscapeMenuText(string text) => text.Replace("&", "&&", StringComparison.Ordinal);
+
+    private void RecentFileMenuItem_Click(object? sender, EventArgs e)
+    {
+        if (sender is not ToolStripMenuItem { Tag: string path })
+            return;
+
+        if (!File.Exists(path))
+        {
+            _recentFiles.RemoveAll(candidate => string.Equals(candidate, path, StringComparison.OrdinalIgnoreCase));
+            MessageBox.Show(
+                this,
+                $"The recent file could not be found:\n{path}",
+                "Recent Files",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Warning);
+            UpdateUiState();
+            return;
+        }
+
+        OpenDocumentsFromPaths([path]);
+    }
+
+    private void AddRecentFile(string filePath)
+    {
+        if (string.IsNullOrWhiteSpace(filePath))
+            return;
+
+        string fullPath = Path.GetFullPath(filePath);
+        _recentFiles.RemoveAll(candidate => string.Equals(candidate, fullPath, StringComparison.OrdinalIgnoreCase));
+        _recentFiles.Insert(0, fullPath);
+
+        if (_recentFiles.Count > MaxRecentFiles)
+            _recentFiles.RemoveRange(MaxRecentFiles, _recentFiles.Count - MaxRecentFiles);
+    }
+
+    private static IEnumerable<string> NormalizeRecentFiles(IEnumerable<string>? files)
+    {
+        if (files is null)
+            yield break;
+
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (string file in files)
+        {
+            if (string.IsNullOrWhiteSpace(file))
+                continue;
+
+            string fullPath;
+            try
+            {
+                fullPath = Path.GetFullPath(file);
+            }
+            catch
+            {
+                continue;
+            }
+
+            if (seen.Add(fullPath))
+                yield return fullPath;
+        }
+    }
+
+    private padTab CreateNewTab(bool select = true, string? defaultName = null)
+    {
+        string tabName = string.IsNullOrWhiteSpace(defaultName)
+            ? $"Untitled {_untitledCounter++}"
+            : defaultName;
+
+        var tab = new padTab(tabName, _themeMode);
         tab.DocumentStateChanged += Tab_DocumentStateChanged;
 
         tab.Editor.MarkdownChanged += Editor_MarkdownChanged;
@@ -217,6 +453,7 @@ public partial class frmMain : Form
             if (existing is not null)
             {
                 selectedTab = existing;
+                AddRecentFile(fullPath);
                 continue;
             }
 
@@ -236,6 +473,7 @@ public partial class frmMain : Form
                 }
 
                 targetTab.LoadDocument(markdown, fullPath);
+                AddRecentFile(fullPath);
                 selectedTab = targetTab;
                 SetStatusMessage($"Opened: {targetTab.DocumentName}");
             }
@@ -310,6 +548,7 @@ public partial class frmMain : Form
             File.WriteAllText(targetPath, tab.Editor.Markdown);
             tab.MarkSaved(targetPath);
             _lastDirectory = Path.GetDirectoryName(targetPath);
+            AddRecentFile(targetPath);
             SetStatusMessage($"Saved: {tab.DocumentName}");
             UpdateUiState();
             return true;
@@ -476,7 +715,8 @@ public partial class frmMain : Form
         using var dialog = new InsertMediaDialog(
             kind,
             documentBasePath: tab.FilePath is null ? null : Path.GetDirectoryName(tab.FilePath),
-            initialTitle: initialTitle);
+            initialTitle: initialTitle,
+            documentMarkdown: kind == InsertMediaKind.Link ? editor.Markdown : null);
 
         if (dialog.ShowDialog(this) != DialogResult.OK)
             return;
@@ -708,6 +948,7 @@ public partial class frmMain : Form
         saveToolStripMenuItem.Enabled = hasEditor;
         saveAsToolStripMenuItem.Enabled = hasEditor;
         saveAllToolStripMenuItem.Enabled = hasDirtyTabs;
+        _recentToolStripMenuItem.Enabled = true;
         closeTabToolStripMenuItem.Enabled = tab is not null;
         closeAllTabsToolStripMenuItem.Enabled = tabControl1.TabPages.Count > 0;
         closeOtherTabsToolStripMenuItem.Enabled = hasMultipleTabs;
@@ -737,6 +978,10 @@ public partial class frmMain : Form
         saveAllToolStripButton.Enabled = hasDirtyTabs;
         undoToolStripButton.Enabled = hasEditor && editor!.CanUndo;
         redoToolStripButton.Enabled = hasEditor && editor!.CanRedo;
+        _cutToolStripButton.Enabled = hasEditor && editor!.CanCut;
+        _copyToolStripButton.Enabled = hasEditor && editor!.CanCopy;
+        _pasteToolStripButton.Enabled = hasEditor && editor!.CanPaste;
+        _selectAllToolStripButton.Enabled = hasEditor && editor!.CanSelectAll;
         findToolStripButton.Enabled = hasEditor;
         findNextToolStripButton.Enabled = hasEditor && editor!.CanFindNext;
         linkToolStripButton.Enabled = hasEditor;
@@ -963,6 +1208,35 @@ public partial class frmMain : Form
         }
     }
 
+    private void ConfigureDynamicUi()
+    {
+        int recentIndex = fileToolStripMenuItem.DropDownItems.IndexOf(fileToolStripSeparator1);
+        if (recentIndex >= 0)
+            fileToolStripMenuItem.DropDownItems.Insert(recentIndex, _recentToolStripMenuItem);
+
+        int editInsertIndex = padToolStrip.Items.IndexOf(findToolStripButton);
+        if (editInsertIndex >= 0)
+        {
+            padToolStrip.Items.Insert(editInsertIndex++, _cutToolStripButton);
+            padToolStrip.Items.Insert(editInsertIndex++, _copyToolStripButton);
+            padToolStrip.Items.Insert(editInsertIndex++, _pasteToolStripButton);
+            padToolStrip.Items.Insert(editInsertIndex++, _selectAllToolStripButton);
+            padToolStrip.Items.Insert(editInsertIndex, _editToolStripSeparator);
+        }
+    }
+
+    private static ToolStripButton CreateToolbarTextButton(string text, string toolTipText)
+    {
+        return new ToolStripButton
+        {
+            AutoSize = false,
+            DisplayStyle = ToolStripItemDisplayStyle.Text,
+            Size = new Size(Math.Max(36, TextRenderer.MeasureText(text, SystemFonts.MenuFont).Width + 14), 69),
+            Text = text,
+            ToolTipText = toolTipText
+        };
+    }
+
     private void HandleMarkdownLink(padTab? sourceTab, LinkActivatedEventArgs e)
     {
         padTab? targetTab = ResolveMarkdownLinkTargetTab(sourceTab, e);
@@ -974,7 +1248,7 @@ public partial class frmMain : Form
 
         if (e.HasFragment)
         {
-            if (!targetTab.Editor.NavigateToHeadingAnchor(e.Fragment))
+            if (!targetTab.Editor.NavigateToMarkdownAnchor(e.Fragment))
             {
                 MessageBox.Show(
                     this,
@@ -1097,7 +1371,13 @@ public partial class frmMain : Form
 
     private void frmMain_FormClosing(object? sender, FormClosingEventArgs e)
     {
-        if (!CloseTabs(OpenTabs.ToList(), ensureReplacementTab: false))
-            e.Cancel = true;
+        try
+        {
+            ApplicationStateStore.Save(CaptureApplicationState());
+        }
+        catch
+        {
+            // Keep application shutdown non-blocking even if the session file cannot be written.
+        }
     }
 }

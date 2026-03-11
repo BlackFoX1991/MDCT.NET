@@ -10,6 +10,7 @@ public enum MarkdownBlockKind
     Image,
     Quote,
     List,
+    FootnoteDefinition,
     CodeFence,
     HorizontalRule,
     Table
@@ -150,6 +151,21 @@ public sealed record ListBlock(
     /// </summary>
     public bool Ordered => IsOrdered;
 }
+
+public sealed record FootnoteDefinitionLine(
+    int SourceLine,
+    int MarkerStartColumn,
+    int CaretColumn,
+    int ContentStartColumn,
+    bool IsFirstLine);
+
+public sealed record FootnoteDefinitionBlock(
+    int StartLine,
+    int EndLine,
+    string Label,
+    string NormalizedLabel,
+    IReadOnlyList<FootnoteDefinitionLine> Lines)
+    : MarkdownBlock(StartLine, EndLine, MarkdownBlockKind.FootnoteDefinition);
 
 public sealed record CodeFenceBlock(int StartLine, int EndLine, string Fence, string Language)
     : MarkdownBlock(StartLine, EndLine, MarkdownBlockKind.CodeFence);

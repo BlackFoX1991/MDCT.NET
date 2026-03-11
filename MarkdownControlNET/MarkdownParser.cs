@@ -11,6 +11,9 @@ public static class MarkdownParser
     private static readonly Regex QuoteRegex = new(@"^\s*>\s?.*$", RegexOptions.Compiled);
     private static readonly Regex QuoteContentRegex = new(@"^\s*>\s?(.*)$", RegexOptions.Compiled);
     private static readonly Regex FenceStartRegex = new(@"^\s*(```+|~~~+)\s*(.*)$", RegexOptions.Compiled);
+    private static readonly Regex FootnoteDefinitionRegex = new(
+        @"^\s{0,3}\[\^(?<label>[^\]]+)\]:(?<ws>[ \t]*)(?<text>.*)$",
+        RegexOptions.Compiled);
 
     // [!NOTE], [!TIP], [!IMPORTANT], [!WARNING], [!CAUTION]
     private static readonly Regex AdmonitionMarkerRegex =
@@ -75,6 +78,12 @@ public static class MarkdownParser
             {
                 blocks.Add(new ImageBlock(i, altText, source));
                 i++;
+                continue;
+            }
+
+            if (TryParseFootnoteDefinition(lines, ref i, out var footnote))
+            {
+                blocks.Add(footnote);
                 continue;
             }
 
@@ -583,6 +592,7 @@ public static class MarkdownParser
         string line = lines[i];
 
         if (string.IsNullOrWhiteSpace(line)) return true;
+        if (FootnoteDefinitionRegex.IsMatch(line)) return true;
         if (HeadingRegex.IsMatch(line)) return true;
         if (TryParseStandaloneImage(line, out _, out _)) return true;
         if (IsHorizontalRule(line)) return true;
@@ -603,6 +613,109 @@ public static class MarkdownParser
         }
 
         return false;
+    }
+
+    private static bool TryParseFootnoteDefinition(IReadOnlyList<string> lines, ref int i, out FootnoteDefinitionBlock block)
+    {
+        block = null!;
+
+        if (i < 0 || i >= lines.Count)
+            return false;
+
+        Match firstMatch = FootnoteDefinitionRegex.Match(lines[i]);
+        if (!firstMatch.Success)
+            return false;
+
+        string label = firstMatch.Groups["label"].Value.Trim();
+        string normalizedLabel = MarkdownFootnoteHelper.NormalizeFootnoteLabel(label);
+        if (string.IsNullOrEmpty(label) || string.IsNullOrEmpty(normalizedLabel))
+            return false;
+
+        int startLine = i;
+        var definitionLines = new List<FootnoteDefinitionLine>
+        {
+            new(
+                SourceLine: i,
+                MarkerStartColumn: Math.Max(0, firstMatch.Groups["label"].Index - 2),
+                CaretColumn: Math.Max(0, firstMatch.Groups["label"].Index - 1),
+                ContentStartColumn: Math.Clamp(firstMatch.Groups["text"].Index, 0, lines[i].Length),
+                IsFirstLine: true)
+        };
+
+        i++;
+
+        while (i < lines.Count)
+        {
+            if (TryGetFootnoteContinuationContentStart(lines[i], out int contentStart))
+            {
+                definitionLines.Add(new FootnoteDefinitionLine(
+                    SourceLine: i,
+                    MarkerStartColumn: 0,
+                    CaretColumn: -1,
+                    ContentStartColumn: contentStart,
+                    IsFirstLine: false));
+                i++;
+                continue;
+            }
+
+            if (!string.IsNullOrWhiteSpace(lines[i]))
+                break;
+
+            int scan = i;
+            while (scan < lines.Count && string.IsNullOrWhiteSpace(lines[scan]))
+                scan++;
+
+            if (scan >= lines.Count || !TryGetFootnoteContinuationContentStart(lines[scan], out _))
+                break;
+
+            while (i < scan)
+            {
+                definitionLines.Add(new FootnoteDefinitionLine(
+                    SourceLine: i,
+                    MarkerStartColumn: 0,
+                    CaretColumn: -1,
+                    ContentStartColumn: lines[i].Length,
+                    IsFirstLine: false));
+                i++;
+            }
+        }
+
+        int endLine = definitionLines[^1].SourceLine;
+        block = new FootnoteDefinitionBlock(startLine, endLine, label, normalizedLabel, definitionLines);
+        return true;
+    }
+
+    private static bool TryGetFootnoteContinuationContentStart(string line, out int contentStart)
+    {
+        contentStart = 0;
+
+        if (string.IsNullOrEmpty(line))
+        {
+            contentStart = 0;
+            return false;
+        }
+
+        if (line[0] == '\t')
+        {
+            contentStart = 1;
+            while (contentStart < line.Length && char.IsWhiteSpace(line[contentStart]))
+                contentStart++;
+
+            return true;
+        }
+
+        int spaces = 0;
+        while (spaces < line.Length && line[spaces] == ' ')
+            spaces++;
+
+        if (spaces < 4)
+            return false;
+
+        contentStart = spaces;
+        while (contentStart < line.Length && line[contentStart] == ' ')
+            contentStart++;
+
+        return true;
     }
 
     // Splittet Zellen und unterstützt escaped pipes "\|"
