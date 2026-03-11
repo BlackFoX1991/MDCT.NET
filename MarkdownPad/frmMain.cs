@@ -13,11 +13,6 @@ public partial class frmMain : Form
     private readonly Queue<string> _pendingPrintSegments = [];
     private readonly List<string> _recentFiles = [];
     private readonly ToolStripMenuItem _recentToolStripMenuItem = new() { Name = "recentToolStripMenuItem", Text = "Recent..." };
-    private readonly ToolStripButton _cutToolStripButton = CreateToolbarTextButton("Cut", "Cut");
-    private readonly ToolStripButton _copyToolStripButton = CreateToolbarTextButton("Copy", "Copy");
-    private readonly ToolStripButton _pasteToolStripButton = CreateToolbarTextButton("Paste", "Paste");
-    private readonly ToolStripButton _selectAllToolStripButton = CreateToolbarTextButton("Select All", "Select All");
-    private readonly ToolStripSeparator _editToolStripSeparator = new();
 
     private EditorThemeMode _themeMode = EditorThemeMode.System;
     private string? _lastDirectory;
@@ -120,10 +115,10 @@ public partial class frmMain : Form
         saveAllToolStripButton.Click += (_, _) => SaveAllDocuments();
         undoToolStripButton.Click += (_, _) => ExecuteOnActiveEditor(editor => editor.UndoCommand());
         redoToolStripButton.Click += (_, _) => ExecuteOnActiveEditor(editor => editor.RedoCommand());
-        _cutToolStripButton.Click += (_, _) => ExecuteOnActiveEditor(editor => editor.CutCommand());
-        _copyToolStripButton.Click += (_, _) => ExecuteOnActiveEditor(editor => editor.CopyCommand());
-        _pasteToolStripButton.Click += (_, _) => ExecuteOnActiveEditor(editor => editor.PasteCommand());
-        _selectAllToolStripButton.Click += (_, _) => ExecuteOnActiveEditor(editor => editor.SelectAllCommand());
+        cutToolStripButton.Click += (_, _) => ExecuteOnActiveEditor(editor => editor.CutCommand());
+        copyToolStripButton.Click += (_, _) => ExecuteOnActiveEditor(editor => editor.CopyCommand());
+        pasteToolStripButton.Click += (_, _) => ExecuteOnActiveEditor(editor => editor.PasteCommand());
+        selectAllToolStripButton.Click += (_, _) => ExecuteOnActiveEditor(editor => editor.SelectAllCommand());
         findToolStripButton.Click += (_, _) => ShowFindDialog();
         findNextToolStripButton.Click += (_, _) => FindNextInActiveDocument();
         linkToolStripButton.Click += (_, _) => ShowInsertLinkDialog();
@@ -978,10 +973,10 @@ public partial class frmMain : Form
         saveAllToolStripButton.Enabled = hasDirtyTabs;
         undoToolStripButton.Enabled = hasEditor && editor!.CanUndo;
         redoToolStripButton.Enabled = hasEditor && editor!.CanRedo;
-        _cutToolStripButton.Enabled = hasEditor && editor!.CanCut;
-        _copyToolStripButton.Enabled = hasEditor && editor!.CanCopy;
-        _pasteToolStripButton.Enabled = hasEditor && editor!.CanPaste;
-        _selectAllToolStripButton.Enabled = hasEditor && editor!.CanSelectAll;
+        cutToolStripButton.Enabled = hasEditor && editor!.CanCut;
+        copyToolStripButton.Enabled = hasEditor && editor!.CanCopy;
+        pasteToolStripButton.Enabled = hasEditor && editor!.CanPaste;
+        selectAllToolStripButton.Enabled = hasEditor && editor!.CanSelectAll;
         findToolStripButton.Enabled = hasEditor;
         findNextToolStripButton.Enabled = hasEditor && editor!.CanFindNext;
         linkToolStripButton.Enabled = hasEditor;
@@ -1213,28 +1208,6 @@ public partial class frmMain : Form
         int recentIndex = fileToolStripMenuItem.DropDownItems.IndexOf(fileToolStripSeparator1);
         if (recentIndex >= 0)
             fileToolStripMenuItem.DropDownItems.Insert(recentIndex, _recentToolStripMenuItem);
-
-        int editInsertIndex = padToolStrip.Items.IndexOf(findToolStripButton);
-        if (editInsertIndex >= 0)
-        {
-            padToolStrip.Items.Insert(editInsertIndex++, _cutToolStripButton);
-            padToolStrip.Items.Insert(editInsertIndex++, _copyToolStripButton);
-            padToolStrip.Items.Insert(editInsertIndex++, _pasteToolStripButton);
-            padToolStrip.Items.Insert(editInsertIndex++, _selectAllToolStripButton);
-            padToolStrip.Items.Insert(editInsertIndex, _editToolStripSeparator);
-        }
-    }
-
-    private static ToolStripButton CreateToolbarTextButton(string text, string toolTipText)
-    {
-        return new ToolStripButton
-        {
-            AutoSize = false,
-            DisplayStyle = ToolStripItemDisplayStyle.Text,
-            Size = new Size(Math.Max(36, TextRenderer.MeasureText(text, SystemFonts.MenuFont).Width + 14), 69),
-            Text = text,
-            ToolTipText = toolTipText
-        };
     }
 
     private void HandleMarkdownLink(padTab? sourceTab, LinkActivatedEventArgs e)

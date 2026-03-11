@@ -84,6 +84,11 @@ namespace MarkdownPad
             undoToolStripButton = new ToolStripButton();
             redoToolStripButton = new ToolStripButton();
             toolStripSeparator2 = new ToolStripSeparator();
+            cutToolStripButton = new ToolStripButton();
+            copyToolStripButton = new ToolStripButton();
+            pasteToolStripButton = new ToolStripButton();
+            selectAllToolStripButton = new ToolStripButton();
+            toolStripSeparator10 = new ToolStripSeparator();
             findToolStripButton = new ToolStripButton();
             findNextToolStripButton = new ToolStripButton();
             toolStripSeparator3 = new ToolStripSeparator();
@@ -304,7 +309,7 @@ namespace MarkdownPad
             undoToolStripMenuItem.Image = (Image)resources.GetObject("undoToolStripMenuItem.Image");
             undoToolStripMenuItem.Name = "undoToolStripMenuItem";
             undoToolStripMenuItem.ShortcutKeys = Keys.Control | Keys.Z;
-            undoToolStripMenuItem.Size = new Size(166, 22);
+            undoToolStripMenuItem.Size = new Size(184, 26);
             undoToolStripMenuItem.Text = "Undo";
             // 
             // redoToolStripMenuItem
@@ -312,20 +317,20 @@ namespace MarkdownPad
             redoToolStripMenuItem.Image = (Image)resources.GetObject("redoToolStripMenuItem.Image");
             redoToolStripMenuItem.Name = "redoToolStripMenuItem";
             redoToolStripMenuItem.ShortcutKeys = Keys.Control | Keys.Y;
-            redoToolStripMenuItem.Size = new Size(166, 22);
+            redoToolStripMenuItem.Size = new Size(184, 26);
             redoToolStripMenuItem.Text = "Redo";
             // 
             // editToolStripSeparator1
             // 
             editToolStripSeparator1.Name = "editToolStripSeparator1";
-            editToolStripSeparator1.Size = new Size(163, 6);
+            editToolStripSeparator1.Size = new Size(181, 6);
             // 
             // cutToolStripMenuItem
             // 
             cutToolStripMenuItem.Image = (Image)resources.GetObject("cutToolStripMenuItem.Image");
             cutToolStripMenuItem.Name = "cutToolStripMenuItem";
             cutToolStripMenuItem.ShortcutKeys = Keys.Control | Keys.X;
-            cutToolStripMenuItem.Size = new Size(166, 22);
+            cutToolStripMenuItem.Size = new Size(184, 26);
             cutToolStripMenuItem.Text = "Cut";
             // 
             // copyToolStripMenuItem
@@ -333,7 +338,7 @@ namespace MarkdownPad
             copyToolStripMenuItem.Image = (Image)resources.GetObject("copyToolStripMenuItem.Image");
             copyToolStripMenuItem.Name = "copyToolStripMenuItem";
             copyToolStripMenuItem.ShortcutKeys = Keys.Control | Keys.C;
-            copyToolStripMenuItem.Size = new Size(166, 22);
+            copyToolStripMenuItem.Size = new Size(184, 26);
             copyToolStripMenuItem.Text = "Copy";
             // 
             // pasteToolStripMenuItem
@@ -341,20 +346,20 @@ namespace MarkdownPad
             pasteToolStripMenuItem.Image = (Image)resources.GetObject("pasteToolStripMenuItem.Image");
             pasteToolStripMenuItem.Name = "pasteToolStripMenuItem";
             pasteToolStripMenuItem.ShortcutKeys = Keys.Control | Keys.V;
-            pasteToolStripMenuItem.Size = new Size(166, 22);
+            pasteToolStripMenuItem.Size = new Size(184, 26);
             pasteToolStripMenuItem.Text = "Paste";
             // 
             // editToolStripSeparator2
             // 
             editToolStripSeparator2.Name = "editToolStripSeparator2";
-            editToolStripSeparator2.Size = new Size(163, 6);
+            editToolStripSeparator2.Size = new Size(181, 6);
             // 
             // selectAllToolStripMenuItem
             // 
             selectAllToolStripMenuItem.Image = (Image)resources.GetObject("selectAllToolStripMenuItem.Image");
             selectAllToolStripMenuItem.Name = "selectAllToolStripMenuItem";
             selectAllToolStripMenuItem.ShortcutKeys = Keys.Control | Keys.A;
-            selectAllToolStripMenuItem.Size = new Size(166, 22);
+            selectAllToolStripMenuItem.Size = new Size(184, 26);
             selectAllToolStripMenuItem.Text = "Select All";
             // 
             // formatToolStripMenuItem
@@ -492,7 +497,7 @@ namespace MarkdownPad
             padToolStrip.AutoSize = false;
             padToolStrip.GripStyle = ToolStripGripStyle.Hidden;
             padToolStrip.ImageScalingSize = new Size(20, 20);
-            padToolStrip.Items.AddRange(new ToolStripItem[] { newToolStripButton, openToolStripButton, saveToolStripButton, saveAllToolStripButton, toolStripSeparator1, undoToolStripButton, redoToolStripButton, toolStripSeparator2, findToolStripButton, findNextToolStripButton, toolStripSeparator3, linkToolStripButton, imageToolStripButton, toolStripSeparator9, tableToolStripButton, headingToolStripDropDownButton, quoteToolStripButton, codeFenceToolStripButton, toolStripSeparator8, themeToolStripDropDownButton });
+            padToolStrip.Items.AddRange(new ToolStripItem[] { newToolStripButton, openToolStripButton, saveToolStripButton, saveAllToolStripButton, toolStripSeparator1, undoToolStripButton, redoToolStripButton, toolStripSeparator2, cutToolStripButton, copyToolStripButton, pasteToolStripButton, selectAllToolStripButton, toolStripSeparator10, findToolStripButton, findNextToolStripButton, toolStripSeparator3, linkToolStripButton, imageToolStripButton, toolStripSeparator9, tableToolStripButton, headingToolStripDropDownButton, quoteToolStripButton, codeFenceToolStripButton, toolStripSeparator8, themeToolStripDropDownButton });
             padToolStrip.Location = new Point(0, 24);
             padToolStrip.Name = "padToolStrip";
             padToolStrip.Size = new Size(1063, 72);
@@ -562,6 +567,51 @@ namespace MarkdownPad
             // 
             toolStripSeparator2.Name = "toolStripSeparator2";
             toolStripSeparator2.Size = new Size(6, 72);
+            // 
+            // cutToolStripButton
+            // 
+            cutToolStripButton.AutoSize = false;
+            cutToolStripButton.DisplayStyle = ToolStripItemDisplayStyle.Image;
+            cutToolStripButton.Image = (Image)resources.GetObject("cutToolStripButton.Image");
+            cutToolStripButton.ImageScaling = ToolStripItemImageScaling.None;
+            cutToolStripButton.Name = "cutToolStripButton";
+            cutToolStripButton.Size = new Size(40, 69);
+            cutToolStripButton.Text = "Cut";
+            // 
+            // copyToolStripButton
+            // 
+            copyToolStripButton.AutoSize = false;
+            copyToolStripButton.DisplayStyle = ToolStripItemDisplayStyle.Image;
+            copyToolStripButton.Image = (Image)resources.GetObject("copyToolStripButton.Image");
+            copyToolStripButton.ImageScaling = ToolStripItemImageScaling.None;
+            copyToolStripButton.Name = "copyToolStripButton";
+            copyToolStripButton.Size = new Size(46, 69);
+            copyToolStripButton.Text = "Copy";
+            // 
+            // pasteToolStripButton
+            // 
+            pasteToolStripButton.AutoSize = false;
+            pasteToolStripButton.DisplayStyle = ToolStripItemDisplayStyle.Image;
+            pasteToolStripButton.Image = (Image)resources.GetObject("pasteToolStripButton.Image");
+            pasteToolStripButton.ImageScaling = ToolStripItemImageScaling.None;
+            pasteToolStripButton.Name = "pasteToolStripButton";
+            pasteToolStripButton.Size = new Size(47, 69);
+            pasteToolStripButton.Text = "Paste";
+            // 
+            // selectAllToolStripButton
+            // 
+            selectAllToolStripButton.AutoSize = false;
+            selectAllToolStripButton.DisplayStyle = ToolStripItemDisplayStyle.Image;
+            selectAllToolStripButton.Image = (Image)resources.GetObject("selectAllToolStripButton.Image");
+            selectAllToolStripButton.ImageScaling = ToolStripItemImageScaling.None;
+            selectAllToolStripButton.Name = "selectAllToolStripButton";
+            selectAllToolStripButton.Size = new Size(67, 69);
+            selectAllToolStripButton.Text = "Select All";
+            // 
+            // toolStripSeparator10
+            // 
+            toolStripSeparator10.Name = "toolStripSeparator10";
+            toolStripSeparator10.Size = new Size(6, 72);
             // 
             // findToolStripButton
             // 
@@ -879,6 +929,11 @@ namespace MarkdownPad
         private ToolStripButton undoToolStripButton;
         private ToolStripButton redoToolStripButton;
         private ToolStripSeparator toolStripSeparator2;
+        private ToolStripButton cutToolStripButton;
+        private ToolStripButton copyToolStripButton;
+        private ToolStripButton pasteToolStripButton;
+        private ToolStripButton selectAllToolStripButton;
+        private ToolStripSeparator toolStripSeparator10;
         private ToolStripButton findToolStripButton;
         private ToolStripButton findNextToolStripButton;
         private ToolStripSeparator toolStripSeparator3;
