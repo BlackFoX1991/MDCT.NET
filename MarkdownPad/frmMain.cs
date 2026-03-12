@@ -1,4 +1,5 @@
 using System.Drawing.Printing;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using MarkdownGdi;
@@ -22,6 +23,25 @@ public partial class frmMain : Form
     private readonly TrackBar _viewScaleTrackBar = new();
     private readonly ToolStripLabel _viewScaleToolStripLabel = new() { Name = "viewScaleToolStripLabel", Text = "Scale" };
     private readonly ToolStripLabel _viewScaleValueToolStripLabel = new() { Name = "viewScaleValueToolStripLabel", AutoSize = false, Width = 46 };
+    private readonly ContextMenuStrip _editorContextMenuStrip = new() { Name = "editorContextMenuStrip" };
+    private readonly ToolStripMenuItem _editorContextUndoMenuItem = new() { Name = "editorContextUndoMenuItem", Text = "Undo" };
+    private readonly ToolStripMenuItem _editorContextRedoMenuItem = new() { Name = "editorContextRedoMenuItem", Text = "Redo" };
+    private readonly ToolStripMenuItem _editorContextCutMenuItem = new() { Name = "editorContextCutMenuItem", Text = "Cut" };
+    private readonly ToolStripMenuItem _editorContextCopyMenuItem = new() { Name = "editorContextCopyMenuItem", Text = "Copy" };
+    private readonly ToolStripMenuItem _editorContextPasteMenuItem = new() { Name = "editorContextPasteMenuItem", Text = "Paste" };
+    private readonly ToolStripMenuItem _editorContextSelectAllMenuItem = new() { Name = "editorContextSelectAllMenuItem", Text = "Select All" };
+    private readonly ToolStripMenuItem _editorContextInsertLinkMenuItem = new() { Name = "editorContextInsertLinkMenuItem", Text = "Insert Link..." };
+    private readonly ToolStripMenuItem _editorContextInsertImageMenuItem = new() { Name = "editorContextInsertImageMenuItem", Text = "Insert Image..." };
+    private readonly ToolStripMenuItem _editorContextInsertTableMenuItem = new() { Name = "editorContextInsertTableMenuItem", Text = "Insert Table..." };
+    private readonly ToolStripMenuItem _editorContextHeadingMenuItem = new() { Name = "editorContextHeadingMenuItem", Text = "Heading" };
+    private readonly ToolStripMenuItem _editorContextHeading1MenuItem = new() { Name = "editorContextHeading1MenuItem", Text = "H1" };
+    private readonly ToolStripMenuItem _editorContextHeading2MenuItem = new() { Name = "editorContextHeading2MenuItem", Text = "H2" };
+    private readonly ToolStripMenuItem _editorContextHeading3MenuItem = new() { Name = "editorContextHeading3MenuItem", Text = "H3" };
+    private readonly ToolStripMenuItem _editorContextHeading4MenuItem = new() { Name = "editorContextHeading4MenuItem", Text = "H4" };
+    private readonly ToolStripMenuItem _editorContextHeading5MenuItem = new() { Name = "editorContextHeading5MenuItem", Text = "H5" };
+    private readonly ToolStripMenuItem _editorContextHeading6MenuItem = new() { Name = "editorContextHeading6MenuItem", Text = "H6" };
+    private readonly ToolStripMenuItem _editorContextQuoteMenuItem = new() { Name = "editorContextQuoteMenuItem", Text = "Quote" };
+    private readonly ToolStripMenuItem _editorContextCodeFenceMenuItem = new() { Name = "editorContextCodeFenceMenuItem", Text = "Code Fence" };
     private ToolStripControlHost? _viewScaleTrackBarHost;
     private ToolStripSeparator? _viewScaleToolStripSeparator;
 
@@ -43,6 +63,7 @@ public partial class frmMain : Form
         ConfigureDynamicUi();
         ConfigureMenus();
         ConfigureToolbar();
+        ConfigureEditorContextMenu();
         ConfigurePrinting();
         ConfigureTabControl();
         ConfigureDragAndDrop();
@@ -153,6 +174,71 @@ public partial class frmMain : Form
         themeDarkToolStripDropDownItem.Click += (_, _) => ApplyTheme(EditorThemeMode.Dark);
 
         ConfigureViewScaleToolbar();
+    }
+
+    private void ConfigureEditorContextMenu()
+    {
+        _editorContextMenuStrip.ImageScalingSize = new Size(20, 20);
+        _editorContextUndoMenuItem.Image = undoToolStripButton.Image;
+        _editorContextRedoMenuItem.Image = redoToolStripButton.Image;
+        _editorContextCutMenuItem.Image = cutToolStripButton.Image;
+        _editorContextCopyMenuItem.Image = copyToolStripButton.Image;
+        _editorContextPasteMenuItem.Image = pasteToolStripButton.Image;
+        _editorContextSelectAllMenuItem.Image = selectAllToolStripButton.Image;
+        _editorContextInsertLinkMenuItem.Image = linkToolStripButton.Image;
+        _editorContextInsertImageMenuItem.Image = imageToolStripButton.Image;
+        _editorContextInsertTableMenuItem.Image = tableToolStripButton.Image;
+        _editorContextHeadingMenuItem.Image = headingToolStripDropDownButton.Image;
+        _editorContextQuoteMenuItem.Image = quoteToolStripButton.Image;
+        _editorContextCodeFenceMenuItem.Image = codeFenceToolStripButton.Image;
+
+        _editorContextHeadingMenuItem.DropDownItems.AddRange(
+        [
+            _editorContextHeading1MenuItem,
+            _editorContextHeading2MenuItem,
+            _editorContextHeading3MenuItem,
+            _editorContextHeading4MenuItem,
+            _editorContextHeading5MenuItem,
+            _editorContextHeading6MenuItem
+        ]);
+
+        _editorContextMenuStrip.Items.AddRange(
+        [
+            _editorContextUndoMenuItem,
+            _editorContextRedoMenuItem,
+            new ToolStripSeparator(),
+            _editorContextCutMenuItem,
+            _editorContextCopyMenuItem,
+            _editorContextPasteMenuItem,
+            _editorContextSelectAllMenuItem,
+            new ToolStripSeparator(),
+            _editorContextInsertLinkMenuItem,
+            _editorContextInsertImageMenuItem,
+            _editorContextInsertTableMenuItem,
+            new ToolStripSeparator(),
+            _editorContextHeadingMenuItem,
+            _editorContextQuoteMenuItem,
+            _editorContextCodeFenceMenuItem
+        ]);
+
+        _editorContextUndoMenuItem.Click += (_, _) => ExecuteOnActiveEditor(editor => editor.UndoCommand());
+        _editorContextRedoMenuItem.Click += (_, _) => ExecuteOnActiveEditor(editor => editor.RedoCommand());
+        _editorContextCutMenuItem.Click += (_, _) => ExecuteOnActiveEditor(editor => editor.CutCommand());
+        _editorContextCopyMenuItem.Click += (_, _) => ExecuteOnActiveEditor(editor => editor.CopyCommand());
+        _editorContextPasteMenuItem.Click += (_, _) => ExecuteOnActiveEditor(editor => editor.PasteCommand());
+        _editorContextSelectAllMenuItem.Click += (_, _) => ExecuteOnActiveEditor(editor => editor.SelectAllCommand());
+        _editorContextInsertLinkMenuItem.Click += (_, _) => ShowInsertLinkDialog();
+        _editorContextInsertImageMenuItem.Click += (_, _) => ShowInsertImageDialog();
+        _editorContextInsertTableMenuItem.Click += (_, _) => ShowTableDesigner();
+        _editorContextHeading1MenuItem.Click += (_, _) => ApplyHeading(1);
+        _editorContextHeading2MenuItem.Click += (_, _) => ApplyHeading(2);
+        _editorContextHeading3MenuItem.Click += (_, _) => ApplyHeading(3);
+        _editorContextHeading4MenuItem.Click += (_, _) => ApplyHeading(4);
+        _editorContextHeading5MenuItem.Click += (_, _) => ApplyHeading(5);
+        _editorContextHeading6MenuItem.Click += (_, _) => ApplyHeading(6);
+        _editorContextQuoteMenuItem.Click += (_, _) => ToggleQuoteBlock();
+        _editorContextCodeFenceMenuItem.Click += (_, _) => WrapSelectionInCodeFence();
+        _editorContextMenuStrip.Opening += EditorContextMenuStrip_Opening;
     }
 
     private void ConfigurePrinting()
@@ -421,6 +507,7 @@ public partial class frmMain : Form
 
         var tab = new padTab(tabName, _themeMode, NormalizeViewScale(viewScale));
         tab.DocumentStateChanged += Tab_DocumentStateChanged;
+        tab.Editor.ContextMenuStrip = _editorContextMenuStrip;
 
         tab.Editor.MarkdownChanged += Editor_MarkdownChanged;
         tab.Editor.FindRequested += Editor_FindRequested;
@@ -1024,9 +1111,35 @@ public partial class frmMain : Form
         closeOtherContextTabsToolStripMenuItem.Enabled = hasMultipleTabs;
         closeAllContextTabsToolStripMenuItem.Enabled = tabControl1.TabPages.Count > 0;
 
+        UpdateEditorContextMenuState(editor);
         UpdateViewScaleToolbarState(tab);
         Text = tab is null ? AppTitle : $"{tab.DisplayName} - {AppTitle}";
         UpdateStatusBar();
+    }
+
+    private void EditorContextMenuStrip_Opening(object? sender, CancelEventArgs e)
+    {
+        MarkdownGdiEditor? editor = ActiveEditor;
+        UpdateEditorContextMenuState(editor);
+        e.Cancel = editor is null;
+    }
+
+    private void UpdateEditorContextMenuState(MarkdownGdiEditor? editor)
+    {
+        bool hasEditor = editor is not null;
+
+        _editorContextUndoMenuItem.Enabled = hasEditor && editor!.CanUndo;
+        _editorContextRedoMenuItem.Enabled = hasEditor && editor!.CanRedo;
+        _editorContextCutMenuItem.Enabled = hasEditor && editor!.CanCut;
+        _editorContextCopyMenuItem.Enabled = hasEditor && editor!.CanCopy;
+        _editorContextPasteMenuItem.Enabled = hasEditor && editor!.CanPaste;
+        _editorContextSelectAllMenuItem.Enabled = hasEditor && editor!.CanSelectAll;
+        _editorContextInsertLinkMenuItem.Enabled = hasEditor;
+        _editorContextInsertImageMenuItem.Enabled = hasEditor;
+        _editorContextInsertTableMenuItem.Enabled = hasEditor;
+        _editorContextHeadingMenuItem.Enabled = hasEditor;
+        _editorContextQuoteMenuItem.Enabled = hasEditor;
+        _editorContextCodeFenceMenuItem.Enabled = hasEditor;
     }
 
     private void UpdateStatusBar()

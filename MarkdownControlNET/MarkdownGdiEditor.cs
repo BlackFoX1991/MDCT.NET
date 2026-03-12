@@ -5844,7 +5844,8 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
             Bounds = Rectangle.Inflate(ContentToClient(cellRectContent), -4, -4),
             Font = Font,
             BackColor = _cellEditorBack,
-            ForeColor = _cellEditorFore
+            ForeColor = _cellEditorFore,
+            ContextMenuStrip = ContextMenuStrip
         };
 
         _cellEditor.KeyDown += CellEditor_KeyDown;
