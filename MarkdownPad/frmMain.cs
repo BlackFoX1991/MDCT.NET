@@ -16,8 +16,6 @@ public partial class frmMain : Form
     private const float MaxViewScale = 2.5f;
     private const float ViewScaleStep = 0.1f;
 
-    private readonly List<string> _printLines = [];
-    private readonly Queue<string> _pendingPrintSegments = [];
     private readonly List<string> _recentFiles = [];
     private readonly ToolStripMenuItem _recentToolStripMenuItem = new() { Name = "recentToolStripMenuItem", Text = "Recent..." };
     private readonly TrackBar _viewScaleTrackBar = new();
@@ -49,9 +47,14 @@ public partial class frmMain : Form
     private string? _lastDirectory;
     private string _statusMessage = "Ready";
     private int _untitledCounter = 1;
-    private int _printLineIndex;
+    private int _printContentTop;
+    private int _printRendererWidth;
+    private int _printRendererHeight;
     private int _contextTabIndex = -1;
     private bool _suppressViewScaleTrackBarChange;
+    private padTab? _printSourceTab;
+    private MarkdownGdiEditor? _printRenderer;
+    private Font? _printRendererFont;
 
     public frmMain()
     {
@@ -248,8 +251,14 @@ public partial class frmMain : Form
 
         printDocument.BeginPrint += (_, _) =>
         {
-            _printLineIndex = 0;
-            _pendingPrintSegments.Clear();
+            _printContentTop = 0;
+            DisposePrintRenderer();
+        };
+        printDocument.EndPrint += (_, _) =>
+        {
+            _printContentTop = 0;
+            _printSourceTab = null;
+            DisposePrintRenderer();
         };
         printDocument.PrintPage += PrintDocument_PrintPage;
     }
@@ -886,7 +895,7 @@ public partial class frmMain : Form
 
     private void PrintActiveDocument()
     {
-        if (!PreparePrintBuffer())
+        if (!PreparePrintJob())
             return;
 
         try
@@ -896,16 +905,23 @@ public partial class frmMain : Form
                 printDocument.Print();
                 SetStatusMessage("Print job started");
             }
+            else
+            {
+                _printSourceTab = null;
+                DisposePrintRenderer();
+            }
         }
         catch (Exception ex)
         {
+            _printSourceTab = null;
+            DisposePrintRenderer();
             MessageBox.Show(this, $"Printing failed.\n\n{ex.Message}", "Print", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
     }
 
     private void PreviewActiveDocument()
     {
-        if (!PreparePrintBuffer())
+        if (!PreparePrintJob())
             return;
 
         try
@@ -915,6 +931,8 @@ public partial class frmMain : Form
         }
         catch (Exception ex)
         {
+            _printSourceTab = null;
+            DisposePrintRenderer();
             MessageBox.Show(
                 this,
                 $"The print preview could not be opened.\n\n{ex.Message}",
@@ -924,16 +942,15 @@ public partial class frmMain : Form
         }
     }
 
-    private bool PreparePrintBuffer()
+    private bool PreparePrintJob()
     {
         padTab? tab = ActiveTab;
         if (tab is null)
             return false;
 
-        _printLines.Clear();
-        _pendingPrintSegments.Clear();
-        _printLines.AddRange(tab.Editor.Markdown.Replace("\r\n", "\n").Split('\n'));
-        _printLineIndex = 0;
+        _printSourceTab = tab;
+        _printContentTop = 0;
+        DisposePrintRenderer();
         printDocument.DocumentName = tab.DocumentName;
         return true;
     }
@@ -941,91 +958,120 @@ public partial class frmMain : Form
     private void PrintDocument_PrintPage(object? sender, PrintPageEventArgs e)
     {
         Graphics graphics = e.Graphics ?? throw new InvalidOperationException("Print graphics are not available.");
-        using var printFont = new Font("Consolas", 10f);
-        float lineHeight = printFont.GetHeight(graphics);
-        float y = e.MarginBounds.Top;
-
-        while (_printLineIndex < _printLines.Count || _pendingPrintSegments.Count > 0)
+        padTab? sourceTab = _printSourceTab;
+        if (sourceTab is null)
         {
-            if (_pendingPrintSegments.Count == 0)
-            {
-                string line = _printLines[_printLineIndex];
-                foreach (string wrappedLine in WrapPrintLine(graphics, line, printFont, e.MarginBounds.Width))
-                    _pendingPrintSegments.Enqueue(wrappedLine);
-
-                _printLineIndex++;
-            }
-
-            string nextSegment = _pendingPrintSegments.Peek();
-            if (y + lineHeight > e.MarginBounds.Bottom)
-            {
-                e.HasMorePages = true;
-                return;
-            }
-
-            graphics.DrawString(nextSegment, printFont, Brushes.Black, e.MarginBounds.Left, y, StringFormat.GenericTypographic);
-            y += lineHeight;
-            _pendingPrintSegments.Dequeue();
+            e.HasMorePages = false;
+            return;
         }
 
-        e.HasMorePages = false;
-        _printLineIndex = 0;
-        _pendingPrintSegments.Clear();
-    }
+        MarkdownGdiEditor renderer = EnsurePrintRenderer(sourceTab, e.MarginBounds.Size);
+        float bitmapScale = GetPrintBitmapScale(graphics, sourceTab.Editor.DeviceDpi);
+        int bitmapWidth = Math.Max(1, (int)Math.Ceiling(_printRendererWidth * bitmapScale));
+        int bitmapHeight = Math.Max(1, (int)Math.Ceiling(_printRendererHeight * bitmapScale));
+        using var pageBitmap = new Bitmap(bitmapWidth, bitmapHeight);
+        pageBitmap.SetResolution(Math.Max(1f, graphics.DpiX), Math.Max(1f, graphics.DpiY));
 
-    private static IEnumerable<string> WrapPrintLine(Graphics graphics, string text, Font font, int maxWidth)
-    {
-        if (string.IsNullOrEmpty(text))
+        using (Graphics bitmapGraphics = Graphics.FromImage(pageBitmap))
         {
-            yield return string.Empty;
-            yield break;
+            bitmapGraphics.Clear(renderer.BackColor);
+            renderer.RenderDocumentPage(
+                bitmapGraphics,
+                new Rectangle(0, 0, _printRendererWidth, _printRendererHeight),
+                _printContentTop,
+                outputScale: bitmapScale,
+                textRenderingHint: System.Drawing.Text.TextRenderingHint.AntiAliasGridFit);
         }
 
-        int start = 0;
-
-        while (start < text.Length)
+        System.Drawing.Drawing2D.GraphicsState state = graphics.Save();
+        try
         {
-            int bestLength = FindBestPrintChunkLength(graphics, text, start, font, maxWidth);
-            if (bestLength <= 0)
-                bestLength = 1;
+            graphics.CompositingQuality = System.Drawing.Drawing2D.CompositingQuality.HighQuality;
+            graphics.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+            graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.HighQuality;
+            graphics.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.HighQuality;
+            graphics.DrawImage(pageBitmap, e.MarginBounds);
+        }
+        finally
+        {
+            graphics.Restore(state);
+        }
 
-            int breakLength = bestLength;
-            if (start + breakLength < text.Length)
-            {
-                int lastBreak = text.LastIndexOfAny([' ', '\t', '-', '/'], start + breakLength - 1, breakLength);
-                if (lastBreak >= start + Math.Max(1, breakLength / 2))
-                    breakLength = lastBreak - start + 1;
-            }
+        _printContentTop += Math.Max(1, _printRendererHeight);
+        e.HasMorePages = _printContentTop < renderer.DocumentRenderHeight;
 
-            yield return text.Substring(start, breakLength).TrimEnd('\r');
-            start += breakLength;
+        if (!e.HasMorePages)
+        {
+            _printContentTop = 0;
+            _printSourceTab = null;
+            DisposePrintRenderer();
         }
     }
 
-    private static int FindBestPrintChunkLength(Graphics graphics, string text, int start, Font font, int maxWidth)
+    private MarkdownGdiEditor EnsurePrintRenderer(padTab sourceTab, Size pageSize)
     {
-        int low = 1;
-        int high = text.Length - start;
-        int best = 0;
+        MarkdownGdiEditor sourceEditor = sourceTab.Editor;
+        float printScale = Math.Max(0.1f, sourceTab.ViewScale);
+        int width = Math.Max(1, (int)Math.Round(sourceEditor.ClientSize.Width / printScale, MidpointRounding.AwayFromZero));
+        int height = Math.Max(1, (int)Math.Round(width * (pageSize.Height / (float)Math.Max(1, pageSize.Width))));
 
-        while (low <= high)
+        if (_printRenderer is not null &&
+            _printRendererWidth == width &&
+            _printRendererHeight == height)
         {
-            int mid = (low + high) / 2;
-            string candidate = text.Substring(start, mid);
-            float width = graphics.MeasureString(candidate, font, PointF.Empty, StringFormat.GenericTypographic).Width;
-
-            if (width <= maxWidth)
-            {
-                best = mid;
-                low = mid + 1;
-            }
-            else
-            {
-                high = mid - 1;
-            }
+            return _printRenderer;
         }
 
-        return best;
+        DisposePrintRenderer();
+
+        var renderer = new MarkdownGdiEditor
+        {
+            Size = new Size(width, height),
+            AllowAutoThemeChange = sourceEditor.AllowAutoThemeChange,
+            ThemeMode = sourceEditor.ThemeMode,
+            CanSideScroll = sourceEditor.CanSideScroll,
+            SuppressEditableRawModes = true,
+            BackColor = sourceEditor.BackColor,
+            ForeColor = sourceEditor.ForeColor,
+            SelectionColor = sourceEditor.SelectionColor,
+            QuoteBarColor = sourceEditor.QuoteBarColor,
+            CodeBackgroundColor = sourceEditor.CodeBackgroundColor,
+            TableHeaderBackgroundColor = sourceEditor.TableHeaderBackgroundColor,
+            TableCellBackgroundColor = sourceEditor.TableCellBackgroundColor,
+            TableGridColor = sourceEditor.TableGridColor,
+            InlineCodeBackgroundColor = sourceEditor.InlineCodeBackgroundColor,
+            InlineCodeBorderColor = sourceEditor.InlineCodeBorderColor
+        };
+
+        _printRendererFont = (Font)sourceEditor.Font.Clone();
+        renderer.Font = _printRendererFont;
+
+        _ = renderer.Handle;
+        renderer.LoadDocument(sourceEditor.Markdown, sourceEditor.DocumentBasePath, resetUndoStacks: true);
+        renderer.PreparePresentationRender();
+
+        _printRenderer = renderer;
+        _printRendererWidth = width;
+        _printRendererHeight = height;
+        return renderer;
+    }
+
+    private void DisposePrintRenderer()
+    {
+        _printRenderer?.Dispose();
+        _printRenderer = null;
+        _printRendererWidth = 0;
+        _printRendererHeight = 0;
+
+        _printRendererFont?.Dispose();
+        _printRendererFont = null;
+    }
+
+    private static float GetPrintBitmapScale(Graphics graphics, float sourceDpi)
+    {
+        float normalizedSourceDpi = Math.Max(1f, sourceDpi);
+        float dpiScale = Math.Max(graphics.DpiX, graphics.DpiY) / normalizedSourceDpi;
+        return Math.Clamp(Math.Max(2f, dpiScale), 1f, 4f);
     }
 
     private void ApplyTheme(EditorThemeMode themeMode)

@@ -78,6 +78,14 @@ public sealed class LayoutSegment
     public required int TextWidth { get; init; }
 }
 
+public sealed class TableCellLine
+{
+    public required string DisplayText { get; init; }
+    public required IReadOnlyList<InlineRun> InlineRuns { get; init; }
+    public required Rectangle Bounds { get; set; }
+    public required int TextWidth { get; init; }
+}
+
 public readonly record struct TableHit(TableLayout Table, int Row, int Col, Rectangle CellBounds);
 
 public sealed class TableLayout
@@ -85,6 +93,7 @@ public sealed class TableLayout
     private readonly Rectangle[,] _cellRects;
     private readonly string[,] _cellTexts;
     private readonly IReadOnlyList<InlineRun>[,] _cellRuns;
+    private readonly IReadOnlyList<TableCellLine>[,] _cellLines;
     private readonly TableAlignment[] _colAlignments;
     private Rectangle _bounds;
 
@@ -105,6 +114,7 @@ public sealed class TableLayout
         Rectangle[,] cellRects,
         string[,] cellTexts,
         IReadOnlyList<InlineRun>[,] cellRuns,
+        IReadOnlyList<TableCellLine>[,] cellLines,
         TableAlignment[] colAlignments)
     {
         StartLine = startLine;
@@ -116,12 +126,14 @@ public sealed class TableLayout
         _cellRects = cellRects;
         _cellTexts = cellTexts;
         _cellRuns = cellRuns;
+        _cellLines = cellLines;
         _colAlignments = colAlignments;
     }
 
     public Rectangle GetCellRect(int row, int col) => _cellRects[row, col];
     public string GetCellText(int row, int col) => _cellTexts[row, col];
     public IReadOnlyList<InlineRun> GetCellRuns(int row, int col) => _cellRuns[row, col];
+    public IReadOnlyList<TableCellLine> GetCellLines(int row, int col) => _cellLines[row, col];
 
     public TableAlignment GetColumnAlignment(int col)
         => (col >= 0 && col < _colAlignments.Length) ? _colAlignments[col] : default;
@@ -191,6 +203,7 @@ public sealed class LayoutEngine
     private DocumentModel? _currentDoc;
 
     public Size ContentSize { get; private set; } = new(1, 1);
+    public int DocumentHeight { get; private set; } = 1;
 
     private static readonly StringFormat MeasureStringFormat = new(StringFormat.GenericTypographic)
     {
@@ -631,6 +644,7 @@ public sealed class LayoutEngine
 
         if (doc.LineCount == 0)
         {
+            DocumentHeight = 1;
             ContentSize = new Size(GetDesiredContentWidth(1), Math.Max(1, viewport.Height));
             return;
         }
@@ -1099,7 +1113,8 @@ public sealed class LayoutEngine
 
         _lineTops = _lines.Count == 0 ? Array.Empty<int>() : _lines.Select(line => line.Bounds.Top).ToArray();
         _tableTops = _tables.Count == 0 ? Array.Empty<int>() : _tables.Select(table => table.Bounds.Top).ToArray();
-        ContentSize = new Size(GetDesiredContentWidth(maxWidth), Math.Max(viewport.Height, y + 6));
+        DocumentHeight = Math.Max(1, y + 6);
+        ContentSize = new Size(GetDesiredContentWidth(maxWidth), Math.Max(viewport.Height, DocumentHeight));
     }
 
     public IEnumerable<LayoutLine> GetVisibleLines(Rectangle viewport)
@@ -1425,6 +1440,7 @@ public sealed class LayoutEngine
         var rects = new Rectangle[rows, cols];
         var texts = new string[rows, cols];
         var runs = new IReadOnlyList<InlineRun>[rows, cols];
+        var cellLines = new IReadOnlyList<TableCellLine>[rows, cols];
         int baseHeight = MeasureHeight(graphics, _baseFont) + cellPadY * 2;
 
         var alignments = new TableAlignment[cols];
@@ -1477,9 +1493,42 @@ public sealed class LayoutEngine
             colWidths[c] = w;
         }
 
+        if (!_canSideScroll)
+        {
+            int availableTableWidth = Math.Max(cols, _lastViewport.Width - left - 12);
+            if (colWidths.Sum() > availableTableWidth)
+                colWidths = FitTableColumnsToAvailableWidth(colWidths, availableTableWidth);
+        }
+
+        for (int r = 0; r < rows; r++)
+            rowHeights[r] = baseHeight;
+
+        for (int r = 0; r < rows; r++)
+        {
+            for (int c = 0; c < cols; c++)
+            {
+                Font measureFont = (r == 0) ? _boldFont : _baseFont;
+                int availableContentWidth = Math.Max(1, colWidths[c] - cellPadX * 2);
+                IReadOnlyList<TableCellLine> lines = BuildTableCellLines(
+                    texts[r, c],
+                    runs[r, c],
+                    measureFont,
+                    graphics,
+                    availableContentWidth,
+                    wrap: !_canSideScroll);
+
+                cellLines[r, c] = lines;
+
+                int contentHeight = lines.Count == 0
+                    ? MeasureHeight(graphics, measureFont)
+                    : lines.Sum(line => Math.Max(1, line.Bounds.Height));
+
+                rowHeights[r] = Math.Max(rowHeights[r], contentHeight + cellPadY * 2);
+            }
+        }
+
         int totalW = colWidths.Sum();
         int totalH = rowHeights.Sum();
-
         var bounds = new Rectangle(left, topY, totalW, totalH);
 
         int y = topY;
@@ -1489,6 +1538,7 @@ public sealed class LayoutEngine
             for (int c = 0; c < cols; c++)
             {
                 rects[r, c] = new Rectangle(x, y, colWidths[c], rowHeights[r]);
+                PositionTableCellLines(cellLines[r, c], rects[r, c], alignments[c], cellPadX, cellPadY);
                 x += colWidths[c];
             }
             y += rowHeights[r];
@@ -1504,7 +1554,193 @@ public sealed class LayoutEngine
             rects,
             texts,
             runs,
+            cellLines,
             alignments);
+    }
+
+    private static int[] FitTableColumnsToAvailableWidth(IReadOnlyList<int> naturalWidths, int availableWidth)
+    {
+        int cols = naturalWidths.Count;
+        if (cols == 0)
+            return Array.Empty<int>();
+
+        int totalNaturalWidth = naturalWidths.Sum();
+        if (totalNaturalWidth <= availableWidth)
+            return naturalWidths.ToArray();
+
+        int minWidth = Math.Max(1, availableWidth / cols);
+        var widths = new int[cols];
+        double scale = availableWidth / (double)Math.Max(1, totalNaturalWidth);
+        int assigned = 0;
+
+        for (int i = 0; i < cols; i++)
+        {
+            int scaled = Math.Max(minWidth, (int)Math.Round(naturalWidths[i] * scale, MidpointRounding.AwayFromZero));
+            widths[i] = scaled;
+            assigned += scaled;
+        }
+
+        while (assigned > availableWidth)
+        {
+            int index = -1;
+            int widest = 0;
+            for (int i = 0; i < cols; i++)
+            {
+                if (widths[i] <= 1 || widths[i] <= widest)
+                    continue;
+
+                widest = widths[i];
+                index = i;
+            }
+
+            if (index < 0)
+                break;
+
+            widths[index]--;
+            assigned--;
+        }
+
+        int growIndex = 0;
+        while (assigned < availableWidth)
+        {
+            widths[growIndex % cols]++;
+            growIndex++;
+            assigned++;
+        }
+
+        return widths;
+    }
+
+    private IReadOnlyList<TableCellLine> BuildTableCellLines(
+        string displayText,
+        IReadOnlyList<InlineRun> runs,
+        Font baseFont,
+        Graphics graphics,
+        int availableWidth,
+        bool wrap)
+    {
+        displayText ??= string.Empty;
+        runs ??= Array.Empty<InlineRun>();
+        availableWidth = Math.Max(1, availableWidth);
+
+        if (displayText.Length == 0)
+            return Array.Empty<TableCellLine>();
+
+        float[] visualOffsets = BuildVisualOffsets(displayText, runs, baseFont, graphics);
+        int fullWidth = MeasureLayoutWidth(visualOffsets, displayText, runs, baseFont, graphics);
+        if (!wrap || fullWidth <= availableWidth)
+        {
+            int height = Math.Max(1, MeasureInlineRunsContentHeight(runs, baseFont, graphics));
+            return
+            [
+                new TableCellLine
+                {
+                    DisplayText = displayText,
+                    InlineRuns = runs,
+                    Bounds = new Rectangle(0, 0, fullWidth, height),
+                    TextWidth = fullWidth
+                }
+            ];
+        }
+
+        List<int> breakPositions = BuildWrapBreakPositions(displayText, runs);
+        var lines = new List<TableCellLine>();
+        int start = 0;
+        int totalVisualLength = displayText.Length;
+
+        while (start < totalVisualLength)
+        {
+            int end = FindWrappedTableCellLineEnd(start, breakPositions, visualOffsets, availableWidth, totalVisualLength);
+            int hiddenLeading = start > 0 ? CountLeadingWhitespace(displayText, start, end) : 0;
+            int displayStart = start + hiddenLeading;
+
+            string lineText = displayStart < end
+                ? displayText.Substring(displayStart, end - displayStart)
+                : string.Empty;
+
+            IReadOnlyList<InlineRun> lineRuns = displayStart < end
+                ? SliceInlineRuns(runs, displayStart, end)
+                : Array.Empty<InlineRun>();
+
+            float[] lineOffsets = CreateWrappedSegmentOffsets(visualOffsets, start, displayStart, end);
+            int lineWidth = MeasureLayoutWidth(lineOffsets, lineText, lineRuns, baseFont, graphics);
+            int lineHeight = Math.Max(1, MeasureInlineRunsContentHeight(lineRuns, baseFont, graphics));
+
+            lines.Add(new TableCellLine
+            {
+                DisplayText = lineText,
+                InlineRuns = lineRuns,
+                Bounds = new Rectangle(0, 0, Math.Max(1, lineWidth), lineHeight),
+                TextWidth = Math.Max(1, lineWidth)
+            });
+
+            start = end;
+        }
+
+        return lines.Count == 0 ? Array.Empty<TableCellLine>() : lines;
+    }
+
+    private static int FindWrappedTableCellLineEnd(
+        int start,
+        IReadOnlyList<int> breakPositions,
+        float[] visualOffsets,
+        int availableWidth,
+        int totalVisualLength)
+    {
+        int end = FindWrappedSegmentEnd(start, breakPositions, visualOffsets, availableWidth, totalVisualLength);
+        if (end > start && visualOffsets[end] - visualOffsets[start] <= availableWidth)
+            return end;
+
+        int low = start + 1;
+        int high = totalVisualLength;
+        int best = Math.Min(totalVisualLength, low);
+
+        while (low <= high)
+        {
+            int mid = (low + high) / 2;
+            float width = visualOffsets[mid] - visualOffsets[start];
+            if (width <= availableWidth)
+            {
+                best = mid;
+                low = mid + 1;
+            }
+            else
+            {
+                high = mid - 1;
+            }
+        }
+
+        return Math.Clamp(Math.Max(start + 1, best), start + 1, totalVisualLength);
+    }
+
+    private static void PositionTableCellLines(
+        IReadOnlyList<TableCellLine> lines,
+        Rectangle cellRect,
+        TableAlignment alignment,
+        int cellPadX,
+        int cellPadY)
+    {
+        if (lines.Count == 0)
+            return;
+
+        Rectangle textRect = Rectangle.Inflate(cellRect, -cellPadX, -cellPadY);
+        int totalContentHeight = lines.Sum(line => Math.Max(1, line.Bounds.Height));
+        int y = textRect.Top + Math.Max(0, (textRect.Height - totalContentHeight) / 2);
+
+        foreach (TableCellLine line in lines)
+        {
+            int width = Math.Max(1, Math.Min(textRect.Width, line.TextWidth));
+            int x = textRect.Left;
+
+            if (alignment == TableAlignment.Center)
+                x = textRect.Left + Math.Max(0, (textRect.Width - width) / 2);
+            else if (alignment == TableAlignment.Right)
+                x = textRect.Right - width;
+
+            x = Math.Max(textRect.Left, x);
+            line.Bounds = new Rectangle(x, y, width, Math.Max(1, line.Bounds.Height));
+            y += line.Bounds.Height;
+        }
     }
 
     private InlineParseResult ParseInlineCached(string text)
@@ -2536,8 +2772,8 @@ public sealed class LayoutEngine
         if (_lineIndexBySource.TryGetValue(line.SourceLine, out int updatedIndex))
             _lineTops[updatedIndex] = line.Bounds.Top;
 
-        int contentHeight = Math.Max(_lastViewport.Height, ContentSize.Height + deltaHeight);
-        ContentSize = new Size(GetDesiredContentWidth(_maxContentWidth), contentHeight);
+        DocumentHeight = Math.Max(1, DocumentHeight + deltaHeight);
+        ContentSize = new Size(GetDesiredContentWidth(_maxContentWidth), Math.Max(_lastViewport.Height, DocumentHeight));
     }
 
     private bool CanFastMutateSimplePlainTextDocument()
@@ -2669,9 +2905,10 @@ public sealed class LayoutEngine
         }
 
         _maxContentWidth = maxWidth;
+        DocumentHeight = Math.Max(1, contentBottom + 6);
         ContentSize = new Size(
             GetDesiredContentWidth(maxWidth),
-            Math.Max(_lastViewport.Height, contentBottom + 6));
+            Math.Max(_lastViewport.Height, DocumentHeight));
     }
 
     private bool ShouldMeasureVisualOffsetsEagerly(int sourceLine, int topY, Size viewport, int preferredSourceLine)

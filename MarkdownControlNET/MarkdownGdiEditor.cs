@@ -340,11 +340,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         else
             ApplyLightPaletteCore();
 
-        if (_cellEditor is not null)
-        {
-            _cellEditor.BackColor = _cellEditorBack;
-            _cellEditor.ForeColor = _cellEditorFore;
-        }
+        ApplyCellEditorVisualStyle();
 
         if (!rebuildLayout)
         {
@@ -363,6 +359,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
 
     // --- Theme state ---
     private bool _allowAutoThemeChange = true;
+    private bool _suppressEditableRawModes;
     private bool _systemThemeEventsHooked;
     
 
@@ -425,6 +422,28 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
 
     [Browsable(false)]
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public bool SuppressEditableRawModes
+    {
+        get => _suppressEditableRawModes;
+        set
+        {
+            if (_suppressEditableRawModes == value)
+                return;
+
+            _suppressEditableRawModes = value;
+
+            if (!IsHandleCreated)
+                return;
+
+            InvalidateLayoutContext();
+            RefreshLayoutForCaretContext(force: true);
+            RepositionCellEditor();
+            Invalidate(new Rectangle(Point.Empty, ClientSize), invalidateChildren: false);
+        }
+    }
+
+    [Browsable(false)]
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public string? DocumentBasePath
     {
         get => _documentBasePath;
@@ -453,6 +472,68 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         return string.IsNullOrWhiteSpace(value)
             ? null
             : Path.GetFullPath(value);
+    }
+
+    [Browsable(false)]
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public int DocumentRenderHeight
+    {
+        get
+        {
+            PreparePresentationRender();
+            return Math.Max(1, _layout.DocumentHeight);
+        }
+    }
+
+    public void PreparePresentationRender()
+    {
+        if (!TryApplyPendingInitialRefresh())
+            RefreshLayoutForCaretContext();
+    }
+
+    public void RenderDocumentPage(
+        Graphics graphics,
+        Rectangle bounds,
+        int contentTop,
+        float outputScale = 1f,
+        System.Drawing.Text.TextRenderingHint textRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit)
+    {
+        if (graphics is null)
+            throw new ArgumentNullException(nameof(graphics));
+
+        if (bounds.Width <= 0 || bounds.Height <= 0)
+            return;
+
+        PreparePresentationRender();
+        outputScale = Math.Max(0.1f, outputScale);
+
+        int viewportWidth = Math.Max(1, ClientSize.Width);
+        int viewportTop = Math.Max(0, contentTop);
+        Rectangle viewport = new(0, viewportTop, viewportWidth, bounds.Height);
+
+        GraphicsState state = graphics.Save();
+        try
+        {
+            graphics.ResetTransform();
+            graphics.PageUnit = GraphicsUnit.Pixel;
+            graphics.TextRenderingHint = textRenderingHint;
+            graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            graphics.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.HighQuality;
+            if (outputScale != 1f)
+                graphics.ScaleTransform(outputScale, outputScale);
+
+            using var backBrush = new SolidBrush(BackColor);
+            graphics.FillRectangle(backBrush, bounds);
+
+            graphics.TranslateTransform(bounds.Left, bounds.Top - viewportTop);
+            graphics.SetClip(viewport);
+
+            RenderViewport(graphics, viewport, drawSelection: false, drawCaret: false);
+        }
+        finally
+        {
+            graphics.Restore(state);
+        }
     }
 
 
@@ -1623,6 +1704,19 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         if (runs.Count == 0)
             return false;
 
+        Font baseFont = tableHit.Row == 0 ? _boldFont : Font;
+        IReadOnlyList<TableCellLine> cellLines = tableHit.Table.GetCellLines(tableHit.Row, tableHit.Col);
+        if (cellLines.Count > 0)
+        {
+            foreach (TableCellLine line in cellLines)
+            {
+                if (TryHitLinkRun(contentPoint, line.InlineRuns, baseFont, line.Bounds.X, line.Bounds.Y, line.Bounds.Height, out hit))
+                    return true;
+            }
+
+            return false;
+        }
+
         using var bmp = new Bitmap(1, 1);
         bmp.SetResolution(Math.Max(1f, DeviceDpi), Math.Max(1f, DeviceDpi));
         using var g = Graphics.FromImage(bmp);
@@ -1630,8 +1724,6 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
 
         Rectangle rect = tableHit.Table.GetCellRect(tableHit.Row, tableHit.Col);
         Rectangle textRect = Rectangle.Inflate(rect, -8, -5);
-        Font baseFont = tableHit.Row == 0 ? _boldFont : Font;
-
         int textWidth = MeasureInlineRunsWidthForTable(g, runs, baseFont);
         int x = textRect.Left;
         string align = tableHit.Table.GetColumnAlignment(tableHit.Col).ToString();
@@ -2344,6 +2436,9 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
     private IReadOnlySet<int>? GetRawCodeFenceStarts()
         => _rawCodeFenceStartLine.HasValue ? new HashSet<int> { _rawCodeFenceStartLine.Value } : null;
 
+    private IReadOnlySet<int>? GetEffectiveRawCodeFenceStarts()
+        => _suppressEditableRawModes ? null : GetRawCodeFenceStarts();
+
     // NEW: raw-source lines for any block under caret (heading/quote/list/hr)
     private IReadOnlySet<int>? GetRawSourceLinesForCaretBlock()
     {
@@ -2391,6 +2486,10 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
 
         return false;
     }
+
+    private IReadOnlySet<int>? GetEffectiveRawSourceLinesForCaretBlock()
+        => _suppressEditableRawModes ? null : GetRawSourceLinesForCaretBlock();
+
     private IReadOnlySet<int>? GetRawInlineLinesForCaret()
     {
         int line = _state.Caret.Line;
@@ -2405,6 +2504,9 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         // Nur aktuelle Caret-Zeile als Raw-Inline
         return new HashSet<int> { line };
     }
+
+    private IReadOnlySet<int>? GetEffectiveRawInlineLinesForCaret()
+        => _suppressEditableRawModes ? null : GetRawInlineLinesForCaret();
     private bool IsInsideTable(int sourceLine)
     {
         foreach (var b in _doc.Blocks)
@@ -2820,22 +2922,28 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
             return;
 
         e.Graphics.SetClip(paintBounds);
+        RenderViewport(e.Graphics, paintBounds, drawSelection: true, drawCaret: true);
+    }
 
-        // Draw content first
-        foreach (var line in _layout.GetVisibleLines(paintBounds))
-            DrawLine(e.Graphics, line);
+    private void RenderViewport(Graphics graphics, Rectangle viewport, bool drawSelection, bool drawCaret)
+    {
+        foreach (LayoutLine line in _layout.GetVisibleLines(viewport))
+            DrawLine(graphics, line);
 
-        foreach (var table in _layout.GetVisibleTables(paintBounds))
-            DrawTable(e.Graphics, table);
+        foreach (TableLayout table in _layout.GetVisibleTables(viewport))
+            DrawTable(graphics, table);
 
-        // Then selection overlay
-        DrawSelection(e.Graphics, paintBounds);
+        if (drawSelection)
+            DrawSelection(graphics, viewport);
+
+        if (!drawCaret)
+            return;
 
         if (Focused && _caretVisible && _cellEditor is null &&
             TryGetCaretContentRectangle(_state.Caret, out Rectangle caretRect) &&
-            caretRect.IntersectsWith(paintBounds))
+            caretRect.IntersectsWith(viewport))
         {
-            DrawCaret(e.Graphics);
+            DrawCaret(graphics);
         }
     }
 
@@ -3376,37 +3484,43 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
                 g.FillRectangle(r == 0 ? headerBrush : cellBrush, rect);
                 g.DrawRectangle(gridPen, rect);
 
-                Rectangle textRect = Rectangle.Inflate(rect, -8, -5);
+                Font baseFont = (r == 0) ? _boldFont : Font;
+                IReadOnlyList<TableCellLine> lines = table.GetCellLines(r, c);
+                if (lines.Count > 0)
+                {
+                    DrawTableCellLines(g, lines, baseFont, ForeColor);
+                    continue;
+                }
 
                 IReadOnlyList<InlineRun> runs = table.GetCellRuns(r, c);
                 string fallbackText = table.GetCellText(r, c);
-
-                Font baseFont = (r == 0) ? _boldFont : Font;
-
-                int textWidth = runs.Count > 0
-                    ? MeasureInlineRunsWidthForTable(g, runs, baseFont)
-                    : MeasureWidth(g, fallbackText, baseFont);
-
-                int x = textRect.Left;
-                string align = table.GetColumnAlignment(c).ToString();
-
-                if (align.Equals("Center", StringComparison.OrdinalIgnoreCase))
-                    x = textRect.Left + Math.Max(0, (textRect.Width - textWidth) / 2);
-                else if (align.Equals("Right", StringComparison.OrdinalIgnoreCase))
-                    x = textRect.Right - textWidth;
-
-                x = Math.Max(textRect.Left, x);
+                Rectangle textRect = Rectangle.Inflate(rect, -8, -5);
                 int y = textRect.Top + Math.Max(0, (textRect.Height - MeasureHeight(g, baseFont)) / 2);
 
                 if (runs.Count > 0)
-                    DrawInlineRunsInCell(g, runs, baseFont, new Point(x, y), textRect, ForeColor);
+                    DrawInlineRunsInCell(g, runs, baseFont, new Point(textRect.Left, y), textRect, ForeColor);
                 else
-                    DrawTextGdiPlus(g, fallbackText, baseFont, new Point(x, y), ForeColor);
+                    DrawTextGdiPlus(g, fallbackText, baseFont, new Point(textRect.Left, y), ForeColor);
             }
         }
 
         using var outer = new Pen(_tableOuterBorderColor, 1.2f);
         g.DrawRectangle(outer, table.Bounds);
+    }
+
+    private void DrawTableCellLines(Graphics g, IReadOnlyList<TableCellLine> lines, Font baseFont, Color color)
+    {
+        foreach (TableCellLine line in lines)
+        {
+            if (line.InlineRuns.Count > 0)
+            {
+                DrawInlineRunsInCell(g, line.InlineRuns, baseFont, new Point(line.Bounds.X, line.Bounds.Y), line.Bounds, color);
+                continue;
+            }
+
+            if (!string.IsNullOrEmpty(line.DisplayText))
+                DrawTextGdiPlus(g, line.DisplayText, baseFont, new Point(line.Bounds.X, line.Bounds.Y), color);
+        }
     }
 
     private int MeasureInlineRunsWidthForTable(Graphics g, IReadOnlyList<InlineRun> runs, Font baseFont)
@@ -5070,9 +5184,9 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
 
     private void RebuildLayoutCore()
     {
-        IReadOnlySet<int>? rawCodeFenceStarts = GetRawCodeFenceStarts();
-        IReadOnlySet<int>? rawSourceLines = GetRawSourceLinesForCaretBlock();
-        IReadOnlySet<int>? rawInlineLines = GetRawInlineLinesForCaret();
+        IReadOnlySet<int>? rawCodeFenceStarts = GetEffectiveRawCodeFenceStarts();
+        IReadOnlySet<int>? rawSourceLines = GetEffectiveRawSourceLinesForCaretBlock();
+        IReadOnlySet<int>? rawInlineLines = GetEffectiveRawInlineLinesForCaret();
 
         _layout.Rebuild(
             _doc,
@@ -5138,14 +5252,16 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         if (_layoutContextDocumentVersion != _doc.Version)
             return false;
 
-        if (_layoutContextRawCodeFenceStart != _rawCodeFenceStartLine)
+        int? effectiveRawCodeFenceStart = _suppressEditableRawModes ? null : _rawCodeFenceStartLine;
+        if (_layoutContextRawCodeFenceStart != effectiveRawCodeFenceStart)
             return false;
 
-        int? rawInlineLine = ResolveRawInlineLine();
+        int? rawInlineLine = _suppressEditableRawModes ? null : ResolveRawInlineLine();
         if (_layoutContextRawInlineLine != rawInlineLine)
             return false;
 
-        if (TryGetContainingRawSourceBlockRange(_state.Caret.Line, out int rawSourceStart, out int rawSourceEnd))
+        if (!_suppressEditableRawModes &&
+            TryGetContainingRawSourceBlockRange(_state.Caret.Line, out int rawSourceStart, out int rawSourceEnd))
         {
             if (_layoutContextRawSourceStart != rawSourceStart || _layoutContextRawSourceEnd != rawSourceEnd)
                 return false;
@@ -5990,10 +6106,10 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         };
 
         Rectangle cellContent = table.GetCellRect(row, col);
-        BeginCellEditor(cellContent, model.Rows[row][col]);
+        BeginCellEditor(cellContent, model.Rows[row][col], row);
     }
 
-    private void BeginCellEditor(Rectangle cellRectContent, string text)
+    private void BeginCellEditor(Rectangle cellRectContent, string text, int row)
     {
         _suppressCellLostFocus = true;
 
@@ -6001,11 +6117,15 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         _cellEditor = new TextBox
         {
             BorderStyle = BorderStyle.None,
-            Multiline = false,
+            Multiline = true,
+            WordWrap = true,
+            AcceptsReturn = false,
+            AcceptsTab = false,
+            ScrollBars = ScrollBars.None,
             Text = text,
-            Bounds = Rectangle.Inflate(ContentToClient(cellRectContent), -4, -4),
-            Font = Font,
-            BackColor = _cellEditorBack,
+            Bounds = GetCellEditorBounds(cellRectContent),
+            Font = GetTableCellEditorFont(row),
+            BackColor = GetTableCellEditorBackColor(row),
             ForeColor = _cellEditorFore,
             ContextMenuStrip = ContextMenuStrip
         };
@@ -6176,7 +6296,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
                     {
                         Rectangle cell = relaidTable.GetCellRect(_activeTable.EditRow, _activeTable.EditCol);
                         string txt = _activeTable.Model.Rows[_activeTable.EditRow][_activeTable.EditCol];
-                        BeginCellEditor(cell, txt);
+                        BeginCellEditor(cell, txt, _activeTable.EditRow);
                     }
                     else
                     {
@@ -6223,8 +6343,43 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         int col = Math.Clamp(_activeTable.EditCol, 0, table.Cols - 1);
 
         Rectangle rect = table.GetCellRect(row, col);
-        _cellEditor.Bounds = Rectangle.Inflate(ContentToClient(rect), -4, -4);
+        _cellEditor.Bounds = GetCellEditorBounds(rect);
+        ApplyCellEditorVisualStyle();
     }
+
+    private void ApplyCellEditorVisualStyle()
+    {
+        if (_cellEditor is null)
+            return;
+
+        if (_activeTable is null)
+        {
+            _cellEditor.Font = Font;
+            _cellEditor.BackColor = _cellEditorBack;
+            _cellEditor.ForeColor = _cellEditorFore;
+            return;
+        }
+
+        _cellEditor.Font = GetTableCellEditorFont(_activeTable.EditRow);
+        _cellEditor.BackColor = GetTableCellEditorBackColor(_activeTable.EditRow);
+        _cellEditor.ForeColor = _cellEditorFore;
+    }
+
+    private Rectangle GetCellEditorBounds(Rectangle cellRectContent)
+    {
+        Rectangle bounds = Rectangle.Inflate(ContentToClient(cellRectContent), -1, -1);
+        return new Rectangle(
+            bounds.X,
+            bounds.Y,
+            Math.Max(1, bounds.Width),
+            Math.Max(1, bounds.Height));
+    }
+
+    private Font GetTableCellEditorFont(int row)
+        => row == 0 ? _boldFont : Font;
+
+    private Color GetTableCellEditorBackColor(int row)
+        => row == 0 ? _tableHeaderBg : _tableCellBg;
 
     private sealed class ActiveTableSession
     {
