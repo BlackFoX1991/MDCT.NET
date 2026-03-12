@@ -57,6 +57,7 @@ public sealed class padTab : TabPage
         _pageCanvas.Resize += PageCanvas_Resize;
 
         Editor.Dock = DockStyle.Fill;
+        //Editor.CanSideScroll = true;
         Editor.Margin = Padding.Empty;
         Editor.MarkdownChanged += Editor_MarkdownChanged;
         Editor.ThemeChanged += Editor_ThemeChanged;

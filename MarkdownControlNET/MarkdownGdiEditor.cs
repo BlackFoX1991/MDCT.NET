@@ -572,6 +572,11 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         TextFormatFlags.PreserveGraphicsClipping |
         TextFormatFlags.PreserveGraphicsTranslateTransform;
 
+    private const TextFormatFlags PlainTextMeasureFlags =
+        TextFormatFlags.NoPadding |
+        TextFormatFlags.NoPrefix |
+        TextFormatFlags.SingleLine;
+
     private readonly record struct AdmonitionPalette(
         Color Bar,
         Color Background,
@@ -3700,8 +3705,12 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
 
             if (line.Segments.Count == 0)
             {
-                float x1 = SnapVisualX(line.TextX + MeasureVisualPrefix(g, line, visStart));
-                float x2 = SnapVisualX(line.TextX + MeasureVisualPrefix(g, line, visEnd));
+                if (!TryGetVisualX(g, line, visStart, out _, out float x1) ||
+                    !TryGetVisualX(g, line, visEnd, out _, out float x2))
+                {
+                    continue;
+                }
+
                 float width = Math.Max(1f, x2 - x1);
                 float height = Math.Max(1f, line.Bounds.Height - 2);
 
@@ -3716,8 +3725,8 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
                 if (localEnd <= localStart)
                     continue;
 
-                float x1 = SnapVisualX(segment.Bounds.X + OffsetAt(segment.VisualOffsets, localStart));
-                float x2 = SnapVisualX(segment.Bounds.X + OffsetAt(segment.VisualOffsets, localEnd));
+                float x1 = SnapVisualX(GetSegmentVisualX(g, line, segment, localStart));
+                float x2 = SnapVisualX(GetSegmentVisualX(g, line, segment, localEnd));
                 float width = Math.Max(1f, x2 - x1);
                 float height = Math.Max(1f, segment.Bounds.Height - 2);
 
@@ -5729,6 +5738,12 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
             }
 
             visualCol = Math.Clamp(visualCol, 0, offsets.Length - 1);
+            if (visualCol == offsets.Length - 1 && TryMeasureSimplePlainLineEndOffset(line, out float endOffset))
+            {
+                x = SnapVisualX(line.TextX + endOffset);
+                return true;
+            }
+
             x = SnapVisualX(line.TextX + offsets[visualCol]);
             return true;
         }
@@ -5740,6 +5755,13 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
 
             int localVisualCol = Math.Clamp(visualCol - candidate.VisualStart, 0, candidate.VisualOffsets.Length - 1);
             segment = candidate;
+            if (localVisualCol == candidate.VisualOffsets.Length - 1 &&
+                TryMeasureSimplePlainSegmentEndOffset(line, candidate, out float segmentEndOffset))
+            {
+                x = SnapVisualX(candidate.Bounds.X + segmentEndOffset);
+                return true;
+            }
+
             x = SnapVisualX(candidate.Bounds.X + OffsetAt(candidate.VisualOffsets, localVisualCol));
             return true;
         }
@@ -5747,8 +5769,148 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         LayoutSegment last = line.Segments[^1];
         int localCol = Math.Clamp(visualCol - last.VisualStart, 0, last.VisualOffsets.Length - 1);
         segment = last;
+        if (localCol == last.VisualOffsets.Length - 1 &&
+            TryMeasureSimplePlainSegmentEndOffset(line, last, out float lastSegmentEndOffset))
+        {
+            x = SnapVisualX(last.Bounds.X + lastSegmentEndOffset);
+            return true;
+        }
+
         x = SnapVisualX(last.Bounds.X + OffsetAt(last.VisualOffsets, localCol));
         return true;
+    }
+
+    private bool TryGetVisualX(Graphics g, LayoutLine line, int visualCol, out LayoutSegment? segment, out float x)
+    {
+        segment = null;
+
+        if (line.Segments.Count == 0)
+        {
+            float[] offsets = _layout.GetVisualOffsets(line);
+            if (offsets.Length == 0)
+            {
+                x = SnapVisualX(line.TextX);
+                return false;
+            }
+
+            visualCol = Math.Clamp(visualCol, 0, offsets.Length - 1);
+            if (visualCol == offsets.Length - 1 && TryMeasureSimplePlainLineEndOffset(g, line, out float endOffset))
+            {
+                x = SnapVisualX(line.TextX + endOffset);
+                return true;
+            }
+
+            x = SnapVisualX(line.TextX + offsets[visualCol]);
+            return true;
+        }
+
+        foreach (LayoutSegment candidate in line.Segments)
+        {
+            if (visualCol > candidate.VisualEnd)
+                continue;
+
+            int localVisualCol = Math.Clamp(visualCol - candidate.VisualStart, 0, candidate.VisualOffsets.Length - 1);
+            segment = candidate;
+            if (localVisualCol == candidate.VisualOffsets.Length - 1 &&
+                TryMeasureSimplePlainSegmentEndOffset(g, line, candidate, out float segmentEndOffset))
+            {
+                x = SnapVisualX(candidate.Bounds.X + segmentEndOffset);
+                return true;
+            }
+
+            x = SnapVisualX(candidate.Bounds.X + OffsetAt(candidate.VisualOffsets, localVisualCol));
+            return true;
+        }
+
+        LayoutSegment last = line.Segments[^1];
+        int localCol = Math.Clamp(visualCol - last.VisualStart, 0, last.VisualOffsets.Length - 1);
+        segment = last;
+        if (localCol == last.VisualOffsets.Length - 1 &&
+            TryMeasureSimplePlainSegmentEndOffset(g, line, last, out float lastSegmentEndOffset))
+        {
+            x = SnapVisualX(last.Bounds.X + lastSegmentEndOffset);
+            return true;
+        }
+
+        x = SnapVisualX(last.Bounds.X + OffsetAt(last.VisualOffsets, localCol));
+        return true;
+    }
+
+    private bool TryMeasureSimplePlainLineEndOffset(LayoutLine line, out float endOffset)
+    {
+        endOffset = 0f;
+
+        using Graphics g = CreateGraphics();
+        g.PageUnit = GraphicsUnit.Pixel;
+        g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+        return TryMeasureSimplePlainLineEndOffset(g, line, out endOffset);
+    }
+
+    private bool TryMeasureSimplePlainLineEndOffset(Graphics g, LayoutLine line, out float endOffset)
+    {
+        endOffset = 0f;
+
+        string display = line.Projection.DisplayText;
+        if (string.IsNullOrEmpty(display) ||
+            line.InlineRuns.Count != 1)
+        {
+            return false;
+        }
+
+        InlineRun run = line.InlineRuns[0];
+        if (run.IsImage || run.IsLink || run.IsFootnoteReference || run.Style != InlineStyle.None)
+            return false;
+
+        if (!string.Equals(run.Text, display, StringComparison.Ordinal))
+            return false;
+
+        Size proposed = new(100000, 1000);
+        endOffset = TextRenderer.MeasureText(g, display, GetRenderFont(line), proposed, PlainTextMeasureFlags).Width;
+        return true;
+    }
+
+    private bool TryMeasureSimplePlainSegmentEndOffset(LayoutLine line, LayoutSegment segment, out float endOffset)
+    {
+        endOffset = 0f;
+
+        using Graphics g = CreateGraphics();
+        g.PageUnit = GraphicsUnit.Pixel;
+        g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+        return TryMeasureSimplePlainSegmentEndOffset(g, line, segment, out endOffset);
+    }
+
+    private bool TryMeasureSimplePlainSegmentEndOffset(Graphics g, LayoutLine line, LayoutSegment segment, out float endOffset)
+    {
+        endOffset = 0f;
+
+        if (string.IsNullOrEmpty(segment.DisplayText) ||
+            segment.InlineRuns.Count != 1)
+        {
+            return false;
+        }
+
+        InlineRun run = segment.InlineRuns[0];
+        if (run.IsImage || run.IsLink || run.IsFootnoteReference || run.Style != InlineStyle.None)
+            return false;
+
+        if (!string.Equals(run.Text, segment.DisplayText, StringComparison.Ordinal))
+            return false;
+
+        Size proposed = new(100000, 1000);
+        endOffset = TextRenderer.MeasureText(g, segment.DisplayText, GetRenderFont(line), proposed, PlainTextMeasureFlags).Width;
+        return true;
+    }
+
+    private float GetSegmentVisualX(Graphics g, LayoutLine line, LayoutSegment segment, int localVisualCol)
+    {
+        localVisualCol = Math.Clamp(localVisualCol, 0, segment.VisualOffsets.Length - 1);
+        if (localVisualCol == segment.VisualOffsets.Length - 1 &&
+            TryMeasureSimplePlainSegmentEndOffset(g, line, segment, out float endOffset))
+        {
+            return segment.Bounds.X + endOffset;
+        }
+
+        return segment.Bounds.X + OffsetAt(segment.VisualOffsets, localVisualCol);
     }
 
     private float MeasureVisualPrefix(LayoutLine line, int visualCols)
