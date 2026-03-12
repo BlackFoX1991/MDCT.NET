@@ -75,6 +75,7 @@ namespace MarkdownPad
             findToolStripMenuItem = new ToolStripMenuItem();
             findNextToolStripMenuItem = new ToolStripMenuItem();
             helpToolStripMenuItem = new ToolStripMenuItem();
+            aboutToolStripMenuItem = new ToolStripMenuItem();
             padToolStrip = new ToolStrip();
             newToolStripButton = new ToolStripButton();
             openToolStripButton = new ToolStripButton();
@@ -121,7 +122,6 @@ namespace MarkdownPad
             themeStatusLabel = new ToolStripLabel();
             toolStripSeparator7 = new ToolStripSeparator();
             messageStatusLabel = new ToolStripLabel();
-            aboutToolStripMenuItem = new ToolStripMenuItem();
             tabContextMenuStrip.SuspendLayout();
             padMenu.SuspendLayout();
             padToolStrip.SuspendLayout();
@@ -494,6 +494,14 @@ namespace MarkdownPad
             helpToolStripMenuItem.Size = new Size(44, 20);
             helpToolStripMenuItem.Text = "Help";
             // 
+            // aboutToolStripMenuItem
+            // 
+            aboutToolStripMenuItem.Image = (Image)resources.GetObject("aboutToolStripMenuItem.Image");
+            aboutToolStripMenuItem.Name = "aboutToolStripMenuItem";
+            aboutToolStripMenuItem.Size = new Size(116, 22);
+            aboutToolStripMenuItem.Text = "About...";
+            aboutToolStripMenuItem.Click += aboutToolStripMenuItem_Click;
+            // 
             // padToolStrip
             // 
             padToolStrip.AutoSize = false;
@@ -841,14 +849,6 @@ namespace MarkdownPad
             messageStatusLabel.Size = new Size(39, 22);
             messageStatusLabel.Text = "Ready";
             // 
-            // aboutToolStripMenuItem
-            // 
-            aboutToolStripMenuItem.Image = (Image)resources.GetObject("aboutToolStripMenuItem.Image");
-            aboutToolStripMenuItem.Name = "aboutToolStripMenuItem";
-            aboutToolStripMenuItem.Size = new Size(184, 26);
-            aboutToolStripMenuItem.Text = "About...";
-            aboutToolStripMenuItem.Click += aboutToolStripMenuItem_Click;
-            // 
             // frmMain
             // 
             AutoScaleDimensions = new SizeF(7F, 15F);
@@ -858,6 +858,7 @@ namespace MarkdownPad
             Controls.Add(padToolStrip);
             Controls.Add(padMenu);
             Controls.Add(padStatusToolStrip);
+            DoubleBuffered = true;
             Icon = (Icon)resources.GetObject("$this.Icon");
             MainMenuStrip = padMenu;
             Margin = new Padding(3, 2, 3, 2);

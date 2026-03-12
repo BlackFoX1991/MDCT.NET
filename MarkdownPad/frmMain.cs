@@ -10,11 +10,20 @@ public partial class frmMain : Form
     private const string AppTitle = "MarkdownPad";
     private const int MaxRecentFiles = 12;
     private const int SwRestore = 9;
+    private const float DefaultViewScale = 1f;
+    private const float MinViewScale = 0.75f;
+    private const float MaxViewScale = 2.5f;
+    private const float ViewScaleStep = 0.1f;
 
     private readonly List<string> _printLines = [];
     private readonly Queue<string> _pendingPrintSegments = [];
     private readonly List<string> _recentFiles = [];
     private readonly ToolStripMenuItem _recentToolStripMenuItem = new() { Name = "recentToolStripMenuItem", Text = "Recent..." };
+    private readonly TrackBar _viewScaleTrackBar = new();
+    private readonly ToolStripLabel _viewScaleToolStripLabel = new() { Name = "viewScaleToolStripLabel", Text = "Scale" };
+    private readonly ToolStripLabel _viewScaleValueToolStripLabel = new() { Name = "viewScaleValueToolStripLabel", AutoSize = false, Width = 46 };
+    private ToolStripControlHost? _viewScaleTrackBarHost;
+    private ToolStripSeparator? _viewScaleToolStripSeparator;
 
     private EditorThemeMode _themeMode = EditorThemeMode.System;
     private string? _lastDirectory;
@@ -22,6 +31,7 @@ public partial class frmMain : Form
     private int _untitledCounter = 1;
     private int _printLineIndex;
     private int _contextTabIndex = -1;
+    private bool _suppressViewScaleTrackBarChange;
 
     public frmMain()
     {
@@ -49,6 +59,9 @@ public partial class frmMain : Form
 
     protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
     {
+        if (TryHandleViewScaleShortcut(keyData))
+            return true;
+
         switch (keyData)
         {
             case Keys.Control | Keys.Tab:
@@ -138,6 +151,8 @@ public partial class frmMain : Form
         themeSystemToolStripDropDownItem.Click += (_, _) => ApplyTheme(EditorThemeMode.System);
         themeLightToolStripDropDownItem.Click += (_, _) => ApplyTheme(EditorThemeMode.Light);
         themeDarkToolStripDropDownItem.Click += (_, _) => ApplyTheme(EditorThemeMode.Dark);
+
+        ConfigureViewScaleToolbar();
     }
 
     private void ConfigurePrinting()
@@ -203,7 +218,10 @@ public partial class frmMain : Form
                 ? document.DefaultName
                 : Path.GetFileName(document.FilePath);
 
-            padTab tab = CreateNewTab(select: false, defaultName: restoredName);
+            padTab tab = CreateNewTab(
+                select: false,
+                defaultName: restoredName,
+                viewScale: NormalizeViewScale(document.ViewScale));
             tab.RestoreDocument(document.Markdown ?? string.Empty, document.FilePath, document.Modified);
         }
 
@@ -280,7 +298,8 @@ public partial class frmMain : Form
             FilePath = tab.FilePath,
             DefaultName = tab.IsUntitled ? tab.DocumentName : null,
             Markdown = tab.Editor.Markdown,
-            Modified = tab.Modified
+            Modified = tab.Modified,
+            ViewScale = tab.ViewScale
         };
     }
 
@@ -394,18 +413,19 @@ public partial class frmMain : Form
         }
     }
 
-    private padTab CreateNewTab(bool select = true, string? defaultName = null)
+    private padTab CreateNewTab(bool select = true, string? defaultName = null, float viewScale = DefaultViewScale)
     {
         string tabName = string.IsNullOrWhiteSpace(defaultName)
             ? $"Untitled {_untitledCounter++}"
             : defaultName;
 
-        var tab = new padTab(tabName, _themeMode);
+        var tab = new padTab(tabName, _themeMode, NormalizeViewScale(viewScale));
         tab.DocumentStateChanged += Tab_DocumentStateChanged;
 
         tab.Editor.MarkdownChanged += Editor_MarkdownChanged;
         tab.Editor.FindRequested += Editor_FindRequested;
         tab.Editor.LinkActivated += Editor_LinkActivated;
+        tab.Editor.ViewScaleRequested += Editor_ViewScaleRequested;
         tab.Editor.Enter += Editor_StateAffectingEvent;
         tab.Editor.GotFocus += Editor_StateAffectingEvent;
         tab.Editor.KeyUp += Editor_StateAffectingEvent;
@@ -1004,6 +1024,7 @@ public partial class frmMain : Form
         closeOtherContextTabsToolStripMenuItem.Enabled = hasMultipleTabs;
         closeAllContextTabsToolStripMenuItem.Enabled = tabControl1.TabPages.Count > 0;
 
+        UpdateViewScaleToolbarState(tab);
         Text = tab is null ? AppTitle : $"{tab.DisplayName} - {AppTitle}";
         UpdateStatusBar();
     }
@@ -1015,7 +1036,7 @@ public partial class frmMain : Form
 
         documentStatusLabel.Text = tab is null ? "Document: -" : $"Document: {tab.DisplayName}";
         pathStatusLabel.Text = $"Path: {(tab?.FilePath ?? "Unsaved")}";
-        themeStatusLabel.Text = $"Theme: {GetThemeLabel(_themeMode)}";
+        themeStatusLabel.Text = $"Theme: {GetThemeLabel(_themeMode)} | View: {(tab is null ? "-" : FormatViewScale(tab.ViewScale))}";
 
         if (editor is null)
         {
@@ -1060,6 +1081,137 @@ public partial class frmMain : Form
         string baseName = tab.IsUntitled ? tab.DocumentName : Path.GetFileName(tab.FilePath!) ?? tab.DocumentName;
         return Path.ChangeExtension(baseName, ".md");
     }
+
+    private bool TryHandleViewScaleShortcut(Keys keyData)
+    {
+        Keys keyCode = keyData & Keys.KeyCode;
+        Keys modifiers = keyData & Keys.Modifiers;
+
+        if (modifiers == Keys.Control)
+        {
+            return keyCode switch
+            {
+                Keys.Add or Keys.Oemplus => AdjustViewScale(ActiveTab, +ViewScaleStep),
+                Keys.Subtract or Keys.OemMinus => AdjustViewScale(ActiveTab, -ViewScaleStep),
+                Keys.D0 or Keys.NumPad0 => SetViewScale(ActiveTab, DefaultViewScale),
+                _ => false
+            };
+        }
+
+        if (modifiers == (Keys.Control | Keys.Shift) && keyCode == Keys.Oemplus)
+            return AdjustViewScale(ActiveTab, +ViewScaleStep);
+
+        return false;
+    }
+
+    private bool AdjustViewScale(padTab? tab, float delta)
+        => tab is not null && SetViewScale(tab, tab.ViewScale + delta);
+
+    private bool SetViewScale(padTab? tab, float viewScale, bool restoreEditorFocus = true)
+    {
+        if (tab is null)
+            return false;
+
+        float normalized = NormalizeViewScale(viewScale);
+        bool changed = Math.Abs(tab.ViewScale - normalized) >= 0.001f;
+
+        tab.ApplyViewScale(normalized);
+
+        UpdateUiState();
+
+        if (changed)
+            SetStatusMessage($"View scale: {FormatViewScale(tab.ViewScale)}");
+
+        if (restoreEditorFocus && tab == ActiveTab)
+            FocusEditor(tab);
+
+        return true;
+    }
+
+    private static float NormalizeViewScale(float viewScale)
+    {
+        if (float.IsNaN(viewScale) || float.IsInfinity(viewScale))
+            return DefaultViewScale;
+
+        float rounded = (float)Math.Round(viewScale, 2, MidpointRounding.AwayFromZero);
+        return Math.Clamp(rounded, MinViewScale, MaxViewScale);
+    }
+
+    private static string FormatViewScale(float viewScale)
+        => $"{(int)Math.Round(viewScale * 100f, MidpointRounding.AwayFromZero)}%";
+
+    private void ConfigureViewScaleToolbar()
+    {
+        _viewScaleTrackBar.AutoSize = false;
+        _viewScaleTrackBar.Minimum = ScaleToTrackBarValue(MinViewScale);
+        _viewScaleTrackBar.Maximum = ScaleToTrackBarValue(MaxViewScale);
+        _viewScaleTrackBar.TickFrequency = 25;
+        _viewScaleTrackBar.TickStyle = TickStyle.None;
+        _viewScaleTrackBar.SmallChange = 5;
+        _viewScaleTrackBar.LargeChange = 25;
+        _viewScaleTrackBar.Size = new Size(140, 24);
+        _viewScaleTrackBar.Margin = Padding.Empty;
+        _viewScaleTrackBar.Value = ScaleToTrackBarValue(DefaultViewScale);
+        _viewScaleTrackBar.ValueChanged += ViewScaleTrackBar_ValueChanged;
+
+        _viewScaleToolStripLabel.Margin = new Padding(8, 0, 4, 0);
+        _viewScaleValueToolStripLabel.Margin = new Padding(4, 0, 0, 0);
+        _viewScaleValueToolStripLabel.TextAlign = ContentAlignment.MiddleLeft;
+        _viewScaleValueToolStripLabel.Text = FormatViewScale(DefaultViewScale);
+
+        _viewScaleTrackBarHost = new ToolStripControlHost(_viewScaleTrackBar)
+        {
+            Name = "viewScaleTrackBarHost",
+            AutoSize = false,
+            Size = new Size(150, 28),
+            Margin = new Padding(0)
+        };
+
+        _viewScaleToolStripSeparator = new ToolStripSeparator { Name = "viewScaleToolStripSeparator" };
+
+        padToolStrip.Items.Add(_viewScaleToolStripSeparator);
+        padToolStrip.Items.Add(_viewScaleToolStripLabel);
+        padToolStrip.Items.Add(_viewScaleTrackBarHost);
+        padToolStrip.Items.Add(_viewScaleValueToolStripLabel);
+    }
+
+    private void ViewScaleTrackBar_ValueChanged(object? sender, EventArgs e)
+    {
+        if (_suppressViewScaleTrackBarChange || ActiveTab is null)
+            return;
+
+        SetViewScale(ActiveTab, _viewScaleTrackBar.Value / 100f, restoreEditorFocus: false);
+    }
+
+    private void UpdateViewScaleToolbarState(padTab? tab)
+    {
+        bool enabled = tab is not null;
+        float viewScale = tab?.ViewScale ?? DefaultViewScale;
+
+        _suppressViewScaleTrackBarChange = true;
+        try
+        {
+            _viewScaleTrackBar.Enabled = enabled;
+            _viewScaleTrackBar.Value = ScaleToTrackBarValue(viewScale);
+        }
+        finally
+        {
+            _suppressViewScaleTrackBarChange = false;
+        }
+
+        _viewScaleToolStripLabel.Enabled = enabled;
+        _viewScaleValueToolStripLabel.Enabled = enabled;
+        _viewScaleValueToolStripLabel.Text = enabled ? FormatViewScale(viewScale) : "-";
+
+        if (_viewScaleTrackBarHost is not null)
+            _viewScaleTrackBarHost.Enabled = enabled;
+    }
+
+    private static int ScaleToTrackBarValue(float viewScale)
+        => Math.Clamp(
+            (int)Math.Round(NormalizeViewScale(viewScale) * 100f, MidpointRounding.AwayFromZero),
+            (int)Math.Round(MinViewScale * 100f, MidpointRounding.AwayFromZero),
+            (int)Math.Round(MaxViewScale * 100f, MidpointRounding.AwayFromZero));
 
     private padTab? FindTabByPath(string? filePath)
     {
@@ -1144,6 +1296,21 @@ public partial class frmMain : Form
     {
         _statusMessage = "Document changed";
         UpdateStatusBar();
+    }
+
+    private void Editor_ViewScaleRequested(object? sender, ViewScaleRequestedEventArgs e)
+    {
+        if (sender is not MarkdownGdiEditor editor)
+            return;
+
+        padTab? tab = FindTabByEditor(editor);
+        if (tab is not null && tab != ActiveTab)
+            tabControl1.SelectedTab = tab;
+
+        if (e.Delta > 0)
+            AdjustViewScale(tab, +ViewScaleStep);
+        else if (e.Delta < 0)
+            AdjustViewScale(tab, -ViewScaleStep);
     }
 
     private void Editor_FindRequested(object? sender, FindRequestedEventArgs e)

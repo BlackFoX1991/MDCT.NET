@@ -5,9 +5,22 @@ namespace MarkdownPad;
 
 public sealed class padTab : TabPage
 {
+    private const float DefaultViewScale = 1f;
+    private const float MinViewScale = 0.75f;
+    private const float MaxViewScale = 2.5f;
+    private const int BasePageWidth = 980;
+    private const int BaseMinPageHeight = 160;
+    private const int BasePageHorizontalMargin = 12;
+    private const int BasePageVerticalMargin = 24;
+    private const int BasePagePaddingX = 44;
+    private const int BasePagePaddingY = 28;
+
     private readonly PageCanvasPanel _pageCanvas = new();
     private readonly PageSurfacePanel _pageSurface = new();
     private readonly string _defaultName;
+    private readonly Font _baseEditorFont;
+    private Font? _scaledEditorFont;
+    private float _viewScale = DefaultViewScale;
 
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public MarkdownGdiEditor Editor { get; } = new();
@@ -26,23 +39,22 @@ public sealed class padTab : TabPage
 
     public bool IsUntitled => string.IsNullOrWhiteSpace(FilePath);
 
-    public padTab(string defaultName, EditorThemeMode themeMode)
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public float ViewScale => _viewScale;
+
+    public padTab(string defaultName, EditorThemeMode themeMode, float viewScale = DefaultViewScale)
     {
         _defaultName = defaultName;
+        _baseEditorFont = (Font)Editor.Font.Clone();
 
         SuspendLayout();
 
         UseVisualStyleBackColor = false;
         Padding = Padding.Empty;
 
+        _pageCanvas.AutoScroll = true;
         _pageCanvas.Dock = DockStyle.Fill;
         _pageCanvas.Resize += PageCanvas_Resize;
-
-        _pageSurface.Padding = new Padding(
-            ScaleLogical(44),
-            ScaleLogical(28),
-            ScaleLogical(44),
-            ScaleLogical(28));
 
         Editor.Dock = DockStyle.Fill;
         Editor.Margin = Padding.Empty;
@@ -54,10 +66,30 @@ public sealed class padTab : TabPage
         _pageCanvas.Controls.Add(_pageSurface);
         Controls.Add(_pageCanvas);
 
+        ApplyViewScale(viewScale);
         ApplyEditorChrome();
         LayoutPageSurface();
         ResumeLayout(performLayout: true);
         UpdatePresentation();
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        Font? scaledEditorFont = null;
+
+        if (disposing)
+        {
+            scaledEditorFont = _scaledEditorFont;
+            _scaledEditorFont = null;
+        }
+
+        base.Dispose(disposing);
+
+        if (!disposing)
+            return;
+
+        scaledEditorFont?.Dispose();
+        _baseEditorFont.Dispose();
     }
 
     public void LoadDocument(string markdown, string? filePath)
@@ -95,6 +127,26 @@ public sealed class padTab : TabPage
         UpdatePresentation(raiseEvent: false);
     }
 
+    public void ApplyViewScale(float viewScale)
+    {
+        float normalizedScale = NormalizeViewScale(viewScale);
+        if (_scaledEditorFont is not null && Math.Abs(_viewScale - normalizedScale) < 0.001f)
+            return;
+
+        _viewScale = normalizedScale;
+
+        _pageSurface.Padding = new Padding(
+            ScaleViewLogical(BasePagePaddingX),
+            ScaleViewLogical(BasePagePaddingY),
+            ScaleViewLogical(BasePagePaddingX),
+            ScaleViewLogical(BasePagePaddingY));
+
+        ApplyScaledEditorFont();
+        LayoutPageSurface();
+        _pageCanvas.PerformLayout();
+        _pageCanvas.Invalidate();
+    }
+
     private void Editor_ThemeChanged(object? sender, ThemeChangedEventArgs e)
     {
         ApplyEditorChrome();
@@ -128,14 +180,23 @@ public sealed class padTab : TabPage
         if (_pageCanvas.ClientSize.Width <= 0 || _pageCanvas.ClientSize.Height <= 0)
             return;
 
-        int pageWidth = Math.Min(ScaleLogical(980), Math.Max(1, _pageCanvas.ClientSize.Width - ScaleLogical(12)));
-        pageWidth = Math.Min(pageWidth, _pageCanvas.ClientSize.Width);
+        int horizontalMargin = Math.Max(ScaleLogical(6), ScaleViewLogical(BasePageHorizontalMargin));
+        int verticalMargin = Math.Max(ScaleLogical(12), ScaleLogical(BasePageVerticalMargin / 2));
+        int pageWidth = Math.Max(1, ScaleViewLogical(BasePageWidth));
 
-        int pageHeight = Math.Max(ScaleLogical(160), _pageCanvas.ClientSize.Height - ScaleLogical(24));
-        pageHeight = Math.Min(pageHeight, _pageCanvas.ClientSize.Height);
+        bool requiresHorizontalScroll = pageWidth + horizontalMargin * 2 > _pageCanvas.ClientSize.Width;
+        int reservedScrollHeight = requiresHorizontalScroll ? SystemInformation.HorizontalScrollBarHeight : 0;
+        int availableHeight = Math.Max(1, _pageCanvas.ClientSize.Height - reservedScrollHeight);
+        int pageHeight = Math.Max(ScaleViewLogical(BaseMinPageHeight), availableHeight - ScaleLogical(BasePageVerticalMargin));
 
-        int x = Math.Max(0, (_pageCanvas.ClientSize.Width - pageWidth) / 2);
-        int y = Math.Max(0, (_pageCanvas.ClientSize.Height - pageHeight) / 2);
+        int contentWidth = Math.Max(_pageCanvas.ClientSize.Width, pageWidth + horizontalMargin * 2);
+        int contentHeight = Math.Max(availableHeight, pageHeight + verticalMargin * 2);
+
+        _pageCanvas.AutoScrollMinSize = new Size(contentWidth, contentHeight);
+
+        Rectangle displayRectangle = _pageCanvas.DisplayRectangle;
+        int x = displayRectangle.X + Math.Max(horizontalMargin, (contentWidth - pageWidth) / 2);
+        int y = displayRectangle.Y + Math.Max(verticalMargin, (contentHeight - pageHeight) / 2);
 
         _pageSurface.Bounds = new Rectangle(x, y, pageWidth, pageHeight);
         _pageCanvas.PageBounds = _pageSurface.Bounds;
@@ -168,4 +229,39 @@ public sealed class padTab : TabPage
     }
 
     private int ScaleLogical(int value) => LogicalToDeviceUnits(value);
+
+    private void ApplyScaledEditorFont()
+    {
+        Font nextFont = CreateScaledFont(_baseEditorFont, _viewScale);
+        Font? previousOwnedFont = _scaledEditorFont;
+
+        _scaledEditorFont = nextFont;
+        Editor.Font = nextFont;
+
+        previousOwnedFont?.Dispose();
+    }
+
+    private int ScaleViewLogical(int value)
+        => ScaleLogical(Math.Max(1, (int)Math.Round(value * _viewScale, MidpointRounding.AwayFromZero)));
+
+    private static float NormalizeViewScale(float viewScale)
+    {
+        if (float.IsNaN(viewScale) || float.IsInfinity(viewScale))
+            return DefaultViewScale;
+
+        float rounded = (float)Math.Round(viewScale, 2, MidpointRounding.AwayFromZero);
+        return Math.Clamp(rounded, MinViewScale, MaxViewScale);
+    }
+
+    private static Font CreateScaledFont(Font font, float viewScale)
+    {
+        float scaledSize = Math.Max(1f, font.Size * viewScale);
+        return new Font(
+            font.FontFamily,
+            scaledSize,
+            font.Style,
+            font.Unit,
+            font.GdiCharSet,
+            font.GdiVerticalFont);
+    }
 }

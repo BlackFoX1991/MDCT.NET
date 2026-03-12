@@ -29,6 +29,7 @@ internal sealed class MarkdownPadSessionDocument
     public string? DefaultName { get; set; }
     public string Markdown { get; set; } = string.Empty;
     public bool Modified { get; set; }
+    public float ViewScale { get; set; } = 1f;
 }
 
 internal static class ApplicationStateStore

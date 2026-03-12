@@ -50,6 +50,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
     private readonly System.Windows.Forms.Timer _caretTimer;
     private bool _caretVisible = true;
     private bool _mouseSelecting;
+    private int? _preferredCaretContentX;
 
     private Font _boldFont;
     private Font _monoFont;
@@ -287,6 +288,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
     private Color _imagePlaceholderBack = Color.FromArgb(248, 249, 251);
     private Color _imagePlaceholderBorder = Color.FromArgb(214, 220, 228);
     private Color _imagePlaceholderText = Color.FromArgb(92, 101, 112);
+    private bool _canSideScroll;
     private string? _documentBasePath;
 
     private const int ImagePreviewPaddingY = 8;
@@ -390,6 +392,36 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
 
     [Browsable(false)]
     public bool IsDarkTheme => _isDarkThemeEffective;
+
+    [Category("Layout")]
+    [DefaultValue(false)]
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Visible)]
+    public bool CanSideScroll
+    {
+        get => _canSideScroll;
+        set
+        {
+            if (_canSideScroll == value)
+                return;
+
+            _canSideScroll = value;
+
+            if (!IsHandleCreated)
+                return;
+
+            InvalidateLayoutContext();
+            RefreshLayoutForCaretContext(force: true);
+
+            if (!_canSideScroll)
+            {
+                int scrollY = Math.Max(0, -AutoScrollPosition.Y);
+                AutoScrollPosition = new Point(0, scrollY);
+            }
+
+            RepositionCellEditor();
+            Invalidate(new Rectangle(Point.Empty, ClientSize), invalidateChildren: false);
+        }
+    }
 
     [Browsable(false)]
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
@@ -697,6 +729,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
     // NEW: Host-UI kann darauf reagieren und eigenen Find-Dialog anzeigen
     public event EventHandler<FindRequestedEventArgs>? FindRequested;
     public event EventHandler<LinkActivatedEventArgs>? LinkActivated;
+    public event EventHandler<ViewScaleRequestedEventArgs>? ViewScaleRequested;
 
 
     [Browsable(false)]
@@ -1255,6 +1288,16 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
 
     protected override void OnMouseWheel(MouseEventArgs e)
     {
+        if (ViewScaleRequested is not null && (ModifierKeys & Keys.Control) == Keys.Control)
+        {
+            ViewScaleRequested.Invoke(this, new ViewScaleRequestedEventArgs(e.Delta));
+
+            if (e is HandledMouseEventArgs handledMouseEventArgs)
+                handledMouseEventArgs.Handled = true;
+
+            return;
+        }
+
         base.OnMouseWheel(e);
         RepositionCellEditor();
         Invalidate(new Rectangle(Point.Empty, ClientSize), invalidateChildren: false);
@@ -1285,6 +1328,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         base.OnMouseDown(e);
         if (e.Button != MouseButtons.Left) return;
 
+        ResetPreferredCaretContentX();
         Focus();
         Point content = ClientToContent(e.Location);
 
@@ -1608,6 +1652,26 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         if (contentPoint.Y < line.Bounds.Top || contentPoint.Y > line.Bounds.Bottom)
             return false;
 
+        if (line.Segments.Count > 0)
+        {
+            foreach (LayoutSegment segment in line.Segments)
+            {
+                if (!segment.Bounds.Contains(contentPoint))
+                    continue;
+
+                return TryHitLinkRun(
+                    contentPoint,
+                    segment.InlineRuns,
+                    GetRenderFont(line),
+                    segment.Bounds.X,
+                    segment.Bounds.Top,
+                    segment.Bounds.Height,
+                    out hit);
+            }
+
+            return false;
+        }
+
         return TryHitLinkRun(
             contentPoint,
             line.InlineRuns,
@@ -1789,6 +1853,8 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         if (_cellEditor is not null) return;
         if (char.IsControl(e.KeyChar)) return;
 
+        ResetPreferredCaretContentX();
+
         if (e.KeyChar == '>' && IsCaretAtVisualStart())
         {
             ApplyDocumentEdit(() => _state.InsertText(_doc, "> "));
@@ -1843,6 +1909,10 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         bool shift = e.Shift;
         bool movedCaret = false;
         bool handled = true;
+        bool keepPreferredCaretX = e.KeyCode is Keys.Up or Keys.Down;
+
+        if (!keepPreferredCaretX)
+            ResetPreferredCaretContentX();
 
         switch (e.KeyCode)
         {
@@ -1853,10 +1923,10 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
                 movedCaret = _state.MoveRight(_doc, shift);
                 break;
             case Keys.Up:
-                movedCaret = _state.MoveUp(_doc, shift);
+                movedCaret = MoveCaretVertically(-1, shift);
                 break;
             case Keys.Down:
-                movedCaret = _state.MoveDown(_doc, shift);
+                movedCaret = MoveCaretVertically(+1, shift);
                 break;
             case Keys.Home:
                 movedCaret = _state.MoveHome(_doc, shift, GetVisualLineStartSourceColumn);
@@ -2890,7 +2960,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         }
         else if (!string.IsNullOrEmpty(display))
         {
-            DrawInlineRuns(g, line, new Point(line.TextX, line.Bounds.Top + 1));
+            DrawInlineRuns(g, line);
             DrawTaskCheckboxOverlay(g, line);
         }
     }
@@ -3628,12 +3698,31 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
             visEnd = Math.Clamp(visEnd, 0, display.Length);
             if (visEnd <= visStart) continue;
 
-            float x1 = SnapVisualX(line.TextX + MeasureVisualPrefix(g, line, visStart));
-            float x2 = SnapVisualX(line.TextX + MeasureVisualPrefix(g, line, visEnd));
-            float width = Math.Max(1f, x2 - x1);
-            float height = Math.Max(1f, line.Bounds.Height - 2);
+            if (line.Segments.Count == 0)
+            {
+                float x1 = SnapVisualX(line.TextX + MeasureVisualPrefix(g, line, visStart));
+                float x2 = SnapVisualX(line.TextX + MeasureVisualPrefix(g, line, visEnd));
+                float width = Math.Max(1f, x2 - x1);
+                float height = Math.Max(1f, line.Bounds.Height - 2);
 
-            g.FillRectangle(brush, x1, line.Bounds.Top + 1, width, height);
+                g.FillRectangle(brush, x1, line.Bounds.Top + 1, width, height);
+                continue;
+            }
+
+            foreach (LayoutSegment segment in line.Segments)
+            {
+                int localStart = Math.Max(0, visStart - segment.VisualStart);
+                int localEnd = Math.Min(segment.VisualEnd - segment.VisualStart, visEnd - segment.VisualStart);
+                if (localEnd <= localStart)
+                    continue;
+
+                float x1 = SnapVisualX(segment.Bounds.X + OffsetAt(segment.VisualOffsets, localStart));
+                float x2 = SnapVisualX(segment.Bounds.X + OffsetAt(segment.VisualOffsets, localEnd));
+                float width = Math.Max(1f, x2 - x1);
+                float height = Math.Max(1f, segment.Bounds.Height - 2);
+
+                g.FillRectangle(brush, x1, segment.Bounds.Top + 1, width, height);
+            }
         }
 
         // B) Grid-Table-Selection (visuelle Tabellenzellen)
@@ -3778,21 +3867,26 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         if (glyph != '☐' && glyph != '☑')
             return false;
 
-        float x1 = SnapVisualX(line.TextX + MeasureVisualPrefix(line, checkboxGlyphVisStart));
-        float x2 = SnapVisualX(line.TextX + MeasureVisualPrefix(line, checkboxGlyphVisStart + 1));
+        if (!TryGetVisualX(line, checkboxGlyphVisStart, out LayoutSegment? segment, out float x1) ||
+            !TryGetVisualX(line, checkboxGlyphVisStart + 1, out _, out float x2))
+        {
+            return false;
+        }
+
+        Rectangle bounds = segment?.Bounds ?? line.Bounds;
 
         drawRect = Rectangle.FromLTRB(
             (int)Math.Floor(x1),
-            line.Bounds.Top + 1,
+            bounds.Top + 1,
             Math.Max((int)Math.Ceiling(x2), (int)Math.Floor(x1) + 1),
-            line.Bounds.Bottom - 1);
+            bounds.Bottom - 1);
 
         const int padX = 4;
         hitRect = Rectangle.FromLTRB(
             (int)Math.Floor(x1) - padX,
-            line.Bounds.Top,
+            bounds.Top,
             (int)Math.Ceiling(x2) + padX,
-            line.Bounds.Bottom);
+            bounds.Bottom);
 
         return true;
     }
@@ -3851,9 +3945,8 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         if (!TryGetCaretContentRectangle(_state.Caret, out Rectangle caretRect))
             return;
 
-        using var p = new Pen(ForeColor, 1f);
-        float x = caretRect.Left + ((caretRect.Width - 1) / 2f);
-        g.DrawLine(p, x, caretRect.Top, x, caretRect.Bottom);
+        using var brush = new SolidBrush(ForeColor);
+        g.FillRectangle(brush, caretRect);
     }
 
     private bool TryGetCaretContentRectangle(MarkdownPosition position, out Rectangle caretRect)
@@ -3869,11 +3962,15 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         string display = line.Projection.DisplayText;
         visCol = Math.Clamp(visCol, 0, display.Length);
 
-        int x = (int)Math.Round(SnapVisualX(line.TextX + MeasureVisualPrefix(line, visCol)));
-        int top = line.Bounds.Top + 2;
-        int height = Math.Max(1, line.Bounds.Height - 4);
+        if (!TryGetVisualX(line, visCol, out LayoutSegment? segment, out float caretX))
+            return false;
 
-        caretRect = new Rectangle(x - 1, top, 3, height);
+        Rectangle bounds = segment?.Bounds ?? line.Bounds;
+        int x = (int)Math.Round(caretX);
+        int top = bounds.Top + 2;
+        int height = Math.Max(1, bounds.Height - 4);
+
+        caretRect = new Rectangle(x, top, 1, height);
         return true;
     }
 
@@ -4016,9 +4113,55 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         return visCol == 0;
     }
 
+    private void ResetPreferredCaretContentX()
+    {
+        _preferredCaretContentX = null;
+    }
+
+    private bool MoveCaretVertically(int lineDelta, bool shift)
+    {
+        int targetLine = _state.Caret.Line + lineDelta;
+        if (targetLine < 0 || targetLine >= _doc.LineCount)
+            return false;
+
+        RefreshLayoutForCaretContext();
+
+        if (!TryGetCaretContentRectangle(_state.Caret, out Rectangle caretRect))
+        {
+            return lineDelta < 0
+                ? _state.MoveUp(_doc, shift)
+                : _state.MoveDown(_doc, shift);
+        }
+
+        int preferredX = _preferredCaretContentX ?? (caretRect.Left + Math.Max(0, (caretRect.Width - 1) / 2));
+        _preferredCaretContentX = preferredX;
+
+        LayoutLine? targetLayoutLine = _layout.GetPreparedLine(targetLine);
+        if (targetLayoutLine is null)
+        {
+            MarkdownPosition fallback = new(targetLine, Math.Min(_state.Caret.Column, _doc.GetLineLength(targetLine)));
+            MarkdownPosition beforeFallbackCaret = _state.Caret;
+            MarkdownPosition? beforeFallbackAnchor = _state.Anchor;
+            _state.SetCaret(fallback, shift, _doc);
+            return _state.Caret != beforeFallbackCaret || _state.Anchor != beforeFallbackAnchor;
+        }
+
+        int targetY = targetLayoutLine.Bounds.Top + Math.Max(0, targetLayoutLine.Bounds.Height / 2);
+        MarkdownPosition beforeCaret = _state.Caret;
+        MarkdownPosition? beforeAnchor = _state.Anchor;
+        MarkdownPosition targetPosition = _layout.HitTestText(new Point(preferredX, targetY));
+        targetPosition = new MarkdownPosition(
+            targetLine,
+            Math.Clamp(targetPosition.Column, 0, _doc.GetLineLength(targetLine)));
+
+        _state.SetCaret(targetPosition, shift, _doc);
+        return _state.Caret != beforeCaret || _state.Anchor != beforeAnchor;
+    }
+
     private void ApplyDocumentEdit(Func<bool> editOperation)
     {
         EndCellEdit(discard: false, move: CellMove.None);
+        ResetPreferredCaretContentX();
 
         string[] beforeLines = _doc.SnapshotLines();
         MarkdownPosition beforeCaret = _state.Caret;
@@ -4059,10 +4202,10 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         if (lineIndex < 0 || lineIndex >= _doc.LineCount)
             return false;
 
-        string oldLine = _doc.GetLine(lineIndex);
-        if (!CanUseFastPlainTextLine(lineIndex, oldLine))
+        if (!CanUseFastPlainTextLine(lineIndex, beforeCaret.Column, deletingBackward: false))
             return false;
 
+        string oldLine = _doc.GetLine(lineIndex);
         Rectangle oldLineBounds = Rectangle.Empty;
         if (_layout.GetPreparedLine(lineIndex) is { } oldLayoutLine)
             oldLineBounds = oldLayoutLine.Bounds;
@@ -4086,7 +4229,6 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
 
         if (_state.Caret.Line != lineIndex ||
             _doc.LineCount <= lineIndex ||
-            ContainsFastPathUnsafeMarkdown(newLine) ||
             !_layout.TryFastUpdateSimpleTextLine(lineIndex, newLine))
         {
             FinalizeFastEditFallback(undo, allowMerge: true);
@@ -4098,13 +4240,14 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
             newLineBounds = newLayoutLine.Bounds;
 
         _ = TryGetCaretContentRectangle(_state.Caret, out Rectangle newCaretBounds);
+        bool layoutShifted = oldLineBounds.Height != newLineBounds.Height;
 
         FinalizeFastEdit(
             undo,
             allowMerge: true,
             scrollBefore,
-            structureChanged: false,
-            invalidateWholeClient: false,
+            structureChanged: layoutShifted,
+            invalidateWholeClient: layoutShifted,
             oldLineBounds,
             newLineBounds,
             oldCaretBounds,
@@ -4120,7 +4263,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
 
         MarkdownPosition beforeCaret = _state.Caret;
         if (beforeCaret.Column > 0)
-            return TryApplyFastSingleLinePlainEdit(() => _state.Backspace(_doc));
+            return TryApplyFastSingleLinePlainEdit(deletingBackward: true, () => _state.Backspace(_doc));
 
         int currentLine = beforeCaret.Line;
         if (currentLine <= 0 || !IsEntireDocumentFastPlainTextEligible())
@@ -4195,7 +4338,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         MarkdownPosition beforeCaret = _state.Caret;
         int lineLength = _doc.GetLineLength(beforeCaret.Line);
         if (beforeCaret.Column < lineLength)
-            return TryApplyFastSingleLinePlainEdit(() => _state.Delete(_doc));
+            return TryApplyFastSingleLinePlainEdit(deletingBackward: false, () => _state.Delete(_doc));
 
         return false;
     }
@@ -4272,7 +4415,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         return true;
     }
 
-    private bool TryApplyFastSingleLinePlainEdit(Func<bool> editOperation)
+    private bool TryApplyFastSingleLinePlainEdit(bool deletingBackward, Func<bool> editOperation)
     {
         EndCellEdit(discard: false, move: CellMove.None);
 
@@ -4282,10 +4425,10 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         if (lineIndex < 0 || lineIndex >= _doc.LineCount)
             return false;
 
-        string oldLine = _doc.GetLine(lineIndex);
-        if (!CanUseFastPlainTextLine(lineIndex, oldLine))
+        if (!CanUseFastPlainTextLine(lineIndex, beforeCaret.Column, deletingBackward))
             return false;
 
+        string oldLine = _doc.GetLine(lineIndex);
         Rectangle oldLineBounds = Rectangle.Empty;
         if (_layout.GetPreparedLine(lineIndex) is { } oldLayoutLine)
             oldLineBounds = oldLayoutLine.Bounds;
@@ -4308,7 +4451,6 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
 
         if (_state.Caret.Line != lineIndex ||
             _doc.LineCount <= lineIndex ||
-            ContainsFastPathUnsafeMarkdown(newLine) ||
             !_layout.TryFastUpdateSimpleTextLine(lineIndex, newLine))
         {
             FinalizeFastEditFallback(undo, allowMerge: true);
@@ -4320,13 +4462,14 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
             newLineBounds = newLayoutLine.Bounds;
 
         _ = TryGetCaretContentRectangle(_state.Caret, out Rectangle newCaretBounds);
+        bool layoutShifted = oldLineBounds.Height != newLineBounds.Height;
 
         FinalizeFastEdit(
             undo,
             allowMerge: true,
             scrollBefore,
-            structureChanged: false,
-            invalidateWholeClient: false,
+            structureChanged: layoutShifted,
+            invalidateWholeClient: layoutShifted,
             oldLineBounds,
             newLineBounds,
             oldCaretBounds,
@@ -4384,7 +4527,6 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         {
             if (current != desired)
                 AutoScrollMinSize = desired;
-
             return;
         }
 
@@ -4512,17 +4654,46 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         return true;
     }
 
-    private bool CanUseFastPlainTextLine(int lineIndex, string sourceText)
+    private bool CanUseFastPlainTextLine(int lineIndex, int caretColumn, bool deletingBackward)
     {
         LayoutLine? line = _layout.GetPreparedLine(lineIndex);
-        return line is not null &&
-               line.Kind is MarkdownBlockKind.Paragraph or MarkdownBlockKind.Blank &&
-               !line.IsImagePreview &&
-               !ContainsFastPathUnsafeMarkdown(sourceText);
+        if (line is null || line.IsImagePreview)
+            return false;
+
+        if (line.Kind is not (MarkdownBlockKind.Paragraph or MarkdownBlockKind.Blank or MarkdownBlockKind.List))
+            return false;
+
+        int editColumn = deletingBackward ? caretColumn - 1 : caretColumn;
+        if (editColumn < 0 || editColumn > line.SourceText.Length)
+            return false;
+
+        if (line.Kind == MarkdownBlockKind.List)
+        {
+            int contentStart = Math.Max(0, line.ListContentSourceStart);
+            return editColumn >= contentStart;
+        }
+
+        if (line.Kind == MarkdownBlockKind.Blank && string.IsNullOrWhiteSpace(line.SourceText))
+            return false;
+
+        int leadingWhitespace = CountLeadingWhitespace(line.SourceText);
+        return editColumn >= leadingWhitespace;
+    }
+
+    private static int CountLeadingWhitespace(string text)
+    {
+        int count = 0;
+        while (count < text.Length && char.IsWhiteSpace(text[count]))
+            count++;
+
+        return count;
     }
 
     private bool IsEntireDocumentFastPlainTextEligible()
     {
+        if (!_canSideScroll)
+            return false;
+
         foreach (MarkdownBlock block in _doc.Blocks)
         {
             if (block.Kind is not (MarkdownBlockKind.Paragraph or MarkdownBlockKind.Blank))
@@ -4900,6 +5071,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
             Font,
             _boldFont,
             _monoFont,
+            _canSideScroll,
             DeviceDpi,
             DeviceDpi,
             _state.Caret.Line,
@@ -5131,8 +5303,12 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         string display = line.Projection.DisplayText;
         visCol = Math.Clamp(visCol, 0, display.Length);
 
-        int caretX = (int)Math.Round(SnapVisualX(line.TextX + MeasureVisualPrefix(line, visCol)));
-        int caretY = line.Bounds.Top;
+        if (!TryGetVisualX(line, visCol, out LayoutSegment? segment, out float caretXf))
+            return;
+
+        Rectangle caretBounds = segment?.Bounds ?? line.Bounds;
+        int caretX = (int)Math.Round(caretXf);
+        int caretY = caretBounds.Top;
 
         int viewLeft = -AutoScrollPosition.X;
         int viewTop = -AutoScrollPosition.Y;
@@ -5143,15 +5319,18 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         int targetY = viewTop;
         bool change = false;
 
-        if (caretX < viewLeft)
+        if (_canSideScroll)
         {
-            targetX = Math.Max(0, caretX - 20);
-            change = true;
-        }
-        else if (caretX > viewRight - 10)
-        {
-            targetX = Math.Max(0, caretX - ClientSize.Width + 40);
-            change = true;
+            if (caretX < viewLeft)
+            {
+                targetX = Math.Max(0, caretX - 20);
+                change = true;
+            }
+            else if (caretX > viewRight - 10)
+            {
+                targetX = Math.Max(0, caretX - ClientSize.Width + 40);
+                change = true;
+            }
         }
 
         if (caretY < viewTop)
@@ -5159,9 +5338,9 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
             targetY = Math.Max(0, caretY - 20);
             change = true;
         }
-        else if (caretY + line.Bounds.Height > viewBottom)
+        else if (caretY + caretBounds.Height > viewBottom)
         {
-            targetY = Math.Max(0, caretY + line.Bounds.Height - ClientSize.Height + 20);
+            targetY = Math.Max(0, caretY + caretBounds.Height - ClientSize.Height + 20);
             change = true;
         }
 
@@ -5232,6 +5411,18 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         {
             styled.Dispose();
         }
+    }
+
+    private void DrawInlineRuns(Graphics g, LayoutLine line)
+    {
+        if (line.Segments.Count == 0)
+        {
+            DrawInlineRuns(g, line, new Point(line.TextX, line.Bounds.Top + 1));
+            return;
+        }
+
+        foreach (LayoutSegment segment in line.Segments)
+            DrawInlineRuns(g, line, segment);
     }
 
     private void DrawInlineRuns(Graphics g, LayoutLine line, Point contentTextStart)
@@ -5338,6 +5529,112 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         }
     }
 
+    private void DrawInlineRuns(Graphics g, LayoutLine line, LayoutSegment segment)
+    {
+        if (string.IsNullOrEmpty(segment.DisplayText) || segment.InlineRuns.Count == 0 && segment.HiddenLeadingVisualCount >= segment.VisualOffsets.Length - 1)
+            return;
+
+        Font baseFont = GetRenderFont(line);
+        Point contentTextStart = new(segment.Bounds.X, segment.Bounds.Top + 1);
+
+        if (segment.InlineRuns.Count == 0)
+        {
+            if (!string.IsNullOrEmpty(segment.DisplayText))
+                DrawTextGdiPlus(g, segment.DisplayText, baseFont, contentTextStart, ForeColor);
+
+            return;
+        }
+
+        if (TryDrawSimplePlainSegment(g, segment, contentTextStart, baseFont))
+            return;
+
+        float[] offsets = segment.VisualOffsets;
+        int visCol = segment.HiddenLeadingVisualCount;
+        float baseX = contentTextStart.X;
+        var cache = new Dictionary<int, Font>();
+
+        using var codeBrush = new SolidBrush(_inlineCodeBg);
+        using var codePen = new Pen(_inlineCodeBorder);
+
+        try
+        {
+            foreach (InlineRun run in segment.InlineRuns)
+            {
+                float runX = SnapVisualX(baseX + OffsetAt(offsets, visCol));
+
+                if (run.IsImage)
+                {
+                    Size imageSize = GetInlineImageSize(run.Source);
+                    int imageY = segment.Bounds.Top + Math.Max(0, (segment.Bounds.Height - imageSize.Height) / 2);
+                    DrawInlineImage(g, run, new Rectangle((int)Math.Round(runX), imageY, imageSize.Width, imageSize.Height));
+                    visCol += Math.Max(1, run.VisualLength);
+                    continue;
+                }
+
+                if (string.IsNullOrEmpty(run.Text))
+                    continue;
+
+                bool isCode = (run.Style & InlineStyle.Code) != 0;
+                Font runFont = GetOrCreateInlineFont(cache, baseFont, run.Style, isCode, run.IsFootnoteReference, _monoFont);
+                int visColEnd = visCol + run.Text.Length;
+
+                if (run.IsFootnoteReference)
+                {
+                    int runTextY = segment.Bounds.Top + Math.Max(0, (segment.Bounds.Height - MeasureHeight(g, runFont)) / 2);
+                    DrawTextGdiPlus(g, run.Text, runFont, runX, runTextY - FootnoteRaiseY, _linkColor);
+                    visCol = visColEnd;
+                    continue;
+                }
+
+                if (run.IsLink)
+                {
+                    int runTextY = segment.Bounds.Top + Math.Max(0, (segment.Bounds.Height - MeasureHeight(g, runFont)) / 2);
+                    DrawTextGdiPlus(g, run.Text, runFont, runX, runTextY, _linkColor);
+
+                    float runEndX = SnapVisualX(baseX + OffsetAt(offsets, visColEnd));
+                    float linkWidth = Math.Max(1f, runEndX - runX);
+                    int height = MeasureHeight(g, runFont);
+                    float underlineY = runTextY + Math.Max(1, height - 1);
+                    using var linkPen = new Pen(_linkColor, 1f);
+                    g.DrawLine(linkPen, runX, underlineY, runX + linkWidth, underlineY);
+
+                    visCol = visColEnd;
+                    continue;
+                }
+
+                if (!isCode)
+                {
+                    int runTextY = segment.Bounds.Top + Math.Max(0, (segment.Bounds.Height - MeasureHeight(g, runFont)) / 2);
+                    DrawTextGdiPlus(g, run.Text, runFont, runX, runTextY, ForeColor);
+                    visCol = visColEnd;
+                    continue;
+                }
+
+                float chipEndX = SnapVisualX(baseX + OffsetAt(offsets, visColEnd));
+                int chipXi = (int)Math.Round(runX);
+                int chipWi = Math.Max(1, (int)Math.Round(chipEndX - runX));
+                int textH = MeasureHeight(g, runFont);
+                int chipH = Math.Max(1, textH + InlineCodePadY * 2);
+                int chipY = contentTextStart.Y + Math.Max(0, (segment.Bounds.Height - chipH) / 2);
+
+                var chip = new Rectangle(chipXi, chipY, chipWi, chipH);
+
+                g.FillRectangle(codeBrush, chip);
+                g.DrawRectangle(codePen, chip.X, chip.Y, Math.Max(1, chip.Width - 1), Math.Max(1, chip.Height - 1));
+
+                int textY = chip.Y + Math.Max(0, (chip.Height - textH) / 2);
+                DrawTextGdiPlus(g, run.Text, runFont, runX + InlineCodePadX, textY, ForeColor);
+
+                visCol = visColEnd;
+            }
+        }
+        finally
+        {
+            foreach (Font font in cache.Values)
+                font.Dispose();
+        }
+    }
+
     private bool TryDrawSimplePlainLine(Graphics g, LayoutLine line, Point contentTextStart, string display, Font baseFont)
     {
         if (line.InlineRuns.Count != 1)
@@ -5360,11 +5657,99 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         return true;
     }
 
+    private bool TryDrawSimplePlainSegment(Graphics g, LayoutSegment segment, Point contentTextStart, Font baseFont)
+    {
+        if (segment.InlineRuns.Count != 1)
+            return false;
+
+        InlineRun run = segment.InlineRuns[0];
+        if (run.IsImage || run.IsLink || run.IsFootnoteReference || run.Style != InlineStyle.None)
+            return false;
+
+        if (!string.Equals(run.Text, segment.DisplayText, StringComparison.Ordinal))
+            return false;
+
+        TextRenderer.DrawText(
+            g,
+            segment.DisplayText,
+            baseFont,
+            contentTextStart,
+            ForeColor,
+            PlainTextDrawFlags);
+        return true;
+    }
+
     private static float OffsetAt(float[] offsets, int col)
         => col >= 0 && col < offsets.Length ? offsets[col] : (offsets.Length > 0 ? offsets[^1] : 0f);
 
     private static float SnapVisualX(float x)
         => (float)Math.Round(x, MidpointRounding.AwayFromZero);
+
+    private static int DistanceToY(Rectangle bounds, int y)
+    {
+        if (y < bounds.Top)
+            return bounds.Top - y;
+
+        if (y > bounds.Bottom)
+            return y - bounds.Bottom;
+
+        return 0;
+    }
+
+    private LayoutSegment GetNearestSegment(LayoutLine line, int y)
+    {
+        LayoutSegment best = line.Segments[0];
+        int bestDistance = DistanceToY(best.Bounds, y);
+
+        for (int i = 1; i < line.Segments.Count; i++)
+        {
+            LayoutSegment candidate = line.Segments[i];
+            int distance = DistanceToY(candidate.Bounds, y);
+            if (distance < bestDistance)
+            {
+                best = candidate;
+                bestDistance = distance;
+            }
+        }
+
+        return best;
+    }
+
+    private bool TryGetVisualX(LayoutLine line, int visualCol, out LayoutSegment? segment, out float x)
+    {
+        segment = null;
+
+        if (line.Segments.Count == 0)
+        {
+            float[] offsets = _layout.GetVisualOffsets(line);
+            if (offsets.Length == 0)
+            {
+                x = SnapVisualX(line.TextX);
+                return false;
+            }
+
+            visualCol = Math.Clamp(visualCol, 0, offsets.Length - 1);
+            x = SnapVisualX(line.TextX + offsets[visualCol]);
+            return true;
+        }
+
+        foreach (LayoutSegment candidate in line.Segments)
+        {
+            if (visualCol > candidate.VisualEnd)
+                continue;
+
+            int localVisualCol = Math.Clamp(visualCol - candidate.VisualStart, 0, candidate.VisualOffsets.Length - 1);
+            segment = candidate;
+            x = SnapVisualX(candidate.Bounds.X + OffsetAt(candidate.VisualOffsets, localVisualCol));
+            return true;
+        }
+
+        LayoutSegment last = line.Segments[^1];
+        int localCol = Math.Clamp(visualCol - last.VisualStart, 0, last.VisualOffsets.Length - 1);
+        segment = last;
+        x = SnapVisualX(last.Bounds.X + OffsetAt(last.VisualOffsets, localCol));
+        return true;
+    }
 
     private float MeasureVisualPrefix(LayoutLine line, int visualCols)
     {
