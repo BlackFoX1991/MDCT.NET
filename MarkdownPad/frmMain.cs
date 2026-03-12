@@ -970,7 +970,7 @@ public partial class frmMain : Form
         int bitmapWidth = Math.Max(1, (int)Math.Ceiling(_printRendererWidth * bitmapScale));
         int bitmapHeight = Math.Max(1, (int)Math.Ceiling(_printRendererHeight * bitmapScale));
         using var pageBitmap = new Bitmap(bitmapWidth, bitmapHeight);
-        pageBitmap.SetResolution(Math.Max(1f, graphics.DpiX), Math.Max(1f, graphics.DpiY));
+        pageBitmap.SetResolution(Math.Max(1f, sourceTab.Editor.DeviceDpi), Math.Max(1f, sourceTab.Editor.DeviceDpi));
 
         using (Graphics bitmapGraphics = Graphics.FromImage(pageBitmap))
         {

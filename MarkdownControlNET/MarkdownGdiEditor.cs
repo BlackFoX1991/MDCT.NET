@@ -360,6 +360,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
     // --- Theme state ---
     private bool _allowAutoThemeChange = true;
     private bool _suppressEditableRawModes;
+    private bool _presentationScaledRendering;
     private bool _systemThemeEventsHooked;
     
 
@@ -512,8 +513,10 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         Rectangle viewport = new(0, viewportTop, viewportWidth, bounds.Height);
 
         GraphicsState state = graphics.Save();
+        bool previousPresentationScaledRendering = _presentationScaledRendering;
         try
         {
+            _presentationScaledRendering = outputScale != 1f;
             graphics.ResetTransform();
             graphics.PageUnit = GraphicsUnit.Pixel;
             graphics.TextRenderingHint = textRenderingHint;
@@ -532,6 +535,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         }
         finally
         {
+            _presentationScaledRendering = previousPresentationScaledRendering;
             graphics.Restore(state);
         }
     }
@@ -3195,6 +3199,20 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         if (textRect.Width <= 0 || textRect.Height <= 0)
             return;
 
+        if (_presentationScaledRendering)
+        {
+            using var brush = new SolidBrush(_imagePlaceholderText);
+            using var format = new StringFormat(StringFormat.GenericDefault)
+            {
+                Alignment = StringAlignment.Center,
+                LineAlignment = StringAlignment.Center,
+                Trimming = StringTrimming.EllipsisWord
+            };
+
+            g.DrawString(label, Font, brush, textRect, format);
+            return;
+        }
+
         TextRenderer.DrawText(
             g,
             label,
@@ -4023,6 +4041,12 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
 
         using var backgroundBrush = new SolidBrush(BackColor);
         g.FillRectangle(backgroundBrush, drawRect);
+
+        if (_presentationScaledRendering)
+        {
+            DrawTextGdiPlus(g, glyph, GetRenderFont(line), drawRect.Location, ForeColor);
+            return;
+        }
 
         TextRenderer.DrawText(
             g,
@@ -5772,6 +5796,12 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         if (!string.Equals(run.Text, display, StringComparison.Ordinal))
             return false;
 
+        if (_presentationScaledRendering)
+        {
+            DrawTextGdiPlus(g, display, baseFont, contentTextStart, ForeColor);
+            return true;
+        }
+
         TextRenderer.DrawText(
             g,
             display,
@@ -5793,6 +5823,12 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
 
         if (!string.Equals(run.Text, segment.DisplayText, StringComparison.Ordinal))
             return false;
+
+        if (_presentationScaledRendering)
+        {
+            DrawTextGdiPlus(g, segment.DisplayText, baseFont, contentTextStart, ForeColor);
+            return true;
+        }
 
         TextRenderer.DrawText(
             g,
