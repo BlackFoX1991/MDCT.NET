@@ -248,6 +248,7 @@ public sealed class LayoutEngine
     private const int ImagePreviewPlaceholderWidth = 320;
     private const int ImagePreviewPlaceholderHeight = 180;
     private const int ImagePreviewPaddingY = 8;
+    private static readonly char[] PlainTextExactMeasurementChars = ['`', '<', '>', '[', ']', '(', ')', '*', '_', '~', '|', '\\'];
     private const TextFormatFlags PlainTextMeasureFlags =
         TextFormatFlags.NoPadding |
         TextFormatFlags.NoPrefix |
@@ -2010,7 +2011,14 @@ public sealed class LayoutEngine
                 ? SliceInlineRuns(runs, displayStart, end)
                 : Array.Empty<InlineRun>();
 
-            float[] segmentOffsets = CreateWrappedSegmentOffsets(visualOffsets, start, displayStart, end);
+            float[] segmentOffsets = IsSimplePlainTextLine(segmentDisplay, segmentRuns)
+                ? CreateWrappedSimplePlainSegmentOffsets(
+                    segmentDisplay,
+                    hiddenLeading,
+                    measureFont,
+                    graphics,
+                    preferExactLoop: ShouldPreferExactPlainTextMeasurement(segmentDisplay))
+                : CreateWrappedSegmentOffsets(visualOffsets, start, displayStart, end);
             int segmentWidth = MeasureLayoutWidth(segmentOffsets, segmentDisplay, segmentRuns, measureFont, graphics);
             int segmentHeight = MeasureWrappedSegmentHeight(segmentRuns, measureFont, graphics, kind);
 
@@ -2134,6 +2142,22 @@ public sealed class LayoutEngine
             offsets[i] = fullOffsets[globalVisualIndex] - baseOffset;
         }
 
+        return offsets;
+    }
+
+    private static float[] CreateWrappedSimplePlainSegmentOffsets(
+        string displayText,
+        int hiddenLeading,
+        Font font,
+        Graphics graphics,
+        bool preferExactLoop)
+    {
+        float[] localOffsets = MeasurePrefixWidthsTextRenderer(graphics, displayText, font, preferExactLoop);
+        if (hiddenLeading <= 0)
+            return localOffsets;
+
+        var offsets = new float[hiddenLeading + localOffsets.Length];
+        Array.Copy(localOffsets, 0, offsets, hiddenLeading, localOffsets.Length);
         return offsets;
     }
 
@@ -2951,7 +2975,10 @@ public sealed class LayoutEngine
             return offsets;
 
         if (IsSimplePlainTextLine(displayText, runs))
-            return MeasurePrefixWidthsTextRenderer(graphics, displayText, baseFont, preferExactPlainTextMeasurement);
+        {
+            bool preferExactLoop = preferExactPlainTextMeasurement || ShouldPreferExactPlainTextMeasurement(displayText);
+            return MeasurePrefixWidthsTextRenderer(graphics, displayText, baseFont, preferExactLoop);
+        }
 
         if (runs.Count == 0)
         {
@@ -3018,6 +3045,9 @@ public sealed class LayoutEngine
             && run.Style == InlineStyle.None
             && string.Equals(run.Text, displayText, StringComparison.Ordinal);
     }
+
+    private static bool ShouldPreferExactPlainTextMeasurement(string text)
+        => !string.IsNullOrEmpty(text) && text.IndexOfAny(PlainTextExactMeasurementChars) >= 0;
 
     private static float GetVisualWidth(float[] offsets)
         => offsets.Length == 0 ? 0 : offsets[^1];
