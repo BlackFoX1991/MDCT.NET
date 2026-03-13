@@ -1714,7 +1714,15 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         {
             foreach (TableCellLine line in cellLines)
             {
-                if (TryHitLinkRun(contentPoint, line.InlineRuns, baseFont, line.Bounds.X, line.Bounds.Y, line.Bounds.Height, out hit))
+                if (TryHitLinkRun(
+                    contentPoint,
+                    line.InlineRuns,
+                    line.Bounds.X,
+                    line.Bounds.Y,
+                    line.Bounds.Height,
+                    line.VisualOffsets,
+                    line.HiddenLeadingVisualCount,
+                    out hit))
                     return true;
             }
 
@@ -1763,24 +1771,68 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
                 return TryHitLinkRun(
                     contentPoint,
                     segment.InlineRuns,
-                    GetRenderFont(line),
                     segment.Bounds.X,
                     segment.Bounds.Top,
                     segment.Bounds.Height,
+                    segment.VisualOffsets,
+                    segment.HiddenLeadingVisualCount,
                     out hit);
             }
 
             return false;
         }
 
+        float[] visualOffsets = _layout.GetVisualOffsets(line);
         return TryHitLinkRun(
             contentPoint,
             line.InlineRuns,
-            GetRenderFont(line),
             line.TextX,
             line.Bounds.Top,
             line.Bounds.Height,
+            visualOffsets,
+            0,
             out hit);
+    }
+
+    private static bool TryHitLinkRun(
+        Point contentPoint,
+        IReadOnlyList<InlineRun> runs,
+        int startX,
+        int top,
+        int height,
+        float[] visualOffsets,
+        int visualStart,
+        out LinkHit hit)
+    {
+        hit = default;
+        if (runs.Count == 0)
+            return false;
+
+        int visCol = Math.Max(0, visualStart);
+        int hitHeight = Math.Max(1, height);
+
+        foreach (InlineRun run in runs)
+        {
+            int visualLength = Math.Max(0, run.VisualLength);
+            if (run.IsLink && visualLength > 0)
+            {
+                float runStartX = SnapVisualX(startX + OffsetAt(visualOffsets, visCol));
+                float runEndX = SnapVisualX(startX + OffsetAt(visualOffsets, visCol + visualLength));
+                int left = (int)Math.Round(Math.Min(runStartX, runEndX));
+                int width = Math.Max(1, (int)Math.Round(Math.Abs(runEndX - runStartX)));
+                Rectangle hitRect = new(left, top, width, hitHeight);
+
+                if (hitRect.Contains(contentPoint))
+                {
+                    hit = new LinkHit(run.Text, run.Href);
+                    return true;
+                }
+            }
+
+            visCol += visualLength;
+        }
+
+        return false;
     }
 
     private bool TryHitLinkRun(
@@ -4267,8 +4319,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
 
     private bool MoveCaretVertically(int lineDelta, bool shift)
     {
-        int targetLine = _state.Caret.Line + lineDelta;
-        if (targetLine < 0 || targetLine >= _doc.LineCount)
+        if (lineDelta == 0)
             return false;
 
         RefreshLayoutForCaretContext();
@@ -4283,6 +4334,34 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         int preferredX = _preferredCaretContentX ?? (caretRect.Left + Math.Max(0, (caretRect.Width - 1) / 2));
         _preferredCaretContentX = preferredX;
 
+        LayoutLine? currentLayoutLine = _layout.GetPreparedLine(_state.Caret.Line);
+        if (currentLayoutLine is not null && currentLayoutLine.Segments.Count > 0)
+        {
+            int caretCenterY = caretRect.Top + Math.Max(0, caretRect.Height / 2);
+            int segmentIndex = GetNearestSegmentIndex(currentLayoutLine, caretCenterY);
+            int targetSegmentIndex = segmentIndex + lineDelta;
+
+            if (targetSegmentIndex >= 0 && targetSegmentIndex < currentLayoutLine.Segments.Count)
+            {
+                LayoutSegment targetSegment = currentLayoutLine.Segments[targetSegmentIndex];
+                int segmentTargetY = targetSegment.Bounds.Top + Math.Max(0, targetSegment.Bounds.Height / 2);
+
+                MarkdownPosition beforeSegmentCaret = _state.Caret;
+                MarkdownPosition? beforeSegmentAnchor = _state.Anchor;
+                MarkdownPosition segmentTargetPosition = _layout.HitTestText(new Point(preferredX, segmentTargetY));
+                segmentTargetPosition = new MarkdownPosition(
+                    currentLayoutLine.SourceLine,
+                    Math.Clamp(segmentTargetPosition.Column, 0, _doc.GetLineLength(currentLayoutLine.SourceLine)));
+
+                _state.SetCaret(segmentTargetPosition, shift, _doc);
+                return _state.Caret != beforeSegmentCaret || _state.Anchor != beforeSegmentAnchor;
+            }
+        }
+
+        int targetLine = _state.Caret.Line + lineDelta;
+        if (targetLine < 0 || targetLine >= _doc.LineCount)
+            return false;
+
         LayoutLine? targetLayoutLine = _layout.GetPreparedLine(targetLine);
         if (targetLayoutLine is null)
         {
@@ -4293,7 +4372,19 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
             return _state.Caret != beforeFallbackCaret || _state.Anchor != beforeFallbackAnchor;
         }
 
-        int targetY = targetLayoutLine.Bounds.Top + Math.Max(0, targetLayoutLine.Bounds.Height / 2);
+        int targetY;
+        if (targetLayoutLine.Segments.Count > 0)
+        {
+            LayoutSegment edgeSegment = lineDelta < 0
+                ? targetLayoutLine.Segments[^1]
+                : targetLayoutLine.Segments[0];
+            targetY = edgeSegment.Bounds.Top + Math.Max(0, edgeSegment.Bounds.Height / 2);
+        }
+        else
+        {
+            targetY = targetLayoutLine.Bounds.Top + Math.Max(0, targetLayoutLine.Bounds.Height / 2);
+        }
+
         MarkdownPosition beforeCaret = _state.Caret;
         MarkdownPosition? beforeAnchor = _state.Anchor;
         MarkdownPosition targetPosition = _layout.HitTestText(new Point(preferredX, targetY));
@@ -5857,23 +5948,31 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         return 0;
     }
 
-    private LayoutSegment GetNearestSegment(LayoutLine line, int y)
+    private int GetNearestSegmentIndex(LayoutLine line, int y)
     {
-        LayoutSegment best = line.Segments[0];
-        int bestDistance = DistanceToY(best.Bounds, y);
+        if (line.Segments.Count == 0)
+            return -1;
+
+        int bestIndex = 0;
+        int bestDistance = DistanceToY(line.Segments[0].Bounds, y);
 
         for (int i = 1; i < line.Segments.Count; i++)
         {
-            LayoutSegment candidate = line.Segments[i];
-            int distance = DistanceToY(candidate.Bounds, y);
+            int distance = DistanceToY(line.Segments[i].Bounds, y);
             if (distance < bestDistance)
             {
-                best = candidate;
+                bestIndex = i;
                 bestDistance = distance;
             }
         }
 
-        return best;
+        return bestIndex;
+    }
+
+    private LayoutSegment GetNearestSegment(LayoutLine line, int y)
+    {
+        int index = GetNearestSegmentIndex(line, y);
+        return index >= 0 ? line.Segments[index] : line.Segments[0];
     }
 
     private bool TryGetVisualX(LayoutLine line, int visualCol, out LayoutSegment? segment, out float x)
@@ -5902,7 +6001,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
 
         foreach (LayoutSegment candidate in line.Segments)
         {
-            if (visualCol > candidate.VisualEnd)
+            if (visualCol >= candidate.VisualEnd)
                 continue;
 
             int localVisualCol = Math.Clamp(visualCol - candidate.VisualStart, 0, candidate.VisualOffsets.Length - 1);
@@ -5958,7 +6057,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
 
         foreach (LayoutSegment candidate in line.Segments)
         {
-            if (visualCol > candidate.VisualEnd)
+            if (visualCol >= candidate.VisualEnd)
                 continue;
 
             int localVisualCol = Math.Clamp(visualCol - candidate.VisualStart, 0, candidate.VisualOffsets.Length - 1);

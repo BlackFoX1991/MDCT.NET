@@ -82,6 +82,8 @@ public sealed class TableCellLine
 {
     public required string DisplayText { get; init; }
     public required IReadOnlyList<InlineRun> InlineRuns { get; init; }
+    public required int HiddenLeadingVisualCount { get; init; }
+    public required float[] VisualOffsets { get; init; }
     public required Rectangle Bounds { get; set; }
     public required int TextWidth { get; init; }
 }
@@ -1638,6 +1640,8 @@ public sealed class LayoutEngine
                 {
                     DisplayText = displayText,
                     InlineRuns = runs,
+                    HiddenLeadingVisualCount = 0,
+                    VisualOffsets = visualOffsets,
                     Bounds = new Rectangle(0, 0, fullWidth, height),
                     TextWidth = fullWidth
                 }
@@ -1671,6 +1675,8 @@ public sealed class LayoutEngine
             {
                 DisplayText = lineText,
                 InlineRuns = lineRuns,
+                HiddenLeadingVisualCount = hiddenLeading,
+                VisualOffsets = lineOffsets,
                 Bounds = new Rectangle(0, 0, Math.Max(1, lineWidth), lineHeight),
                 TextWidth = Math.Max(1, lineWidth)
             });
