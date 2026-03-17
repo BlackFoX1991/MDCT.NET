@@ -1997,8 +1997,91 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         Point content = ClientToContent(e.Location);
 
         if (_layout.TryHitTestTableCell(content, out var th))
+        {
             EnterRawTableSourceFromGrid(th.Table, th.Row, th.Col);
+            return;
+        }
+
+        if (TrySelectWordAtPoint(content))
+            _mouseSelecting = false;
     }
+
+    private bool TrySelectWordAtPoint(Point contentPoint)
+    {
+        MarkdownPosition pos = _layout.HitTestText(contentPoint);
+        LayoutLine? line = _layout.GetPreparedLine(pos.Line);
+        if (line is null || line.IsImagePreview)
+            return false;
+
+        string source = line.SourceText;
+        if (string.IsNullOrEmpty(source))
+            return false;
+
+        int index = ResolveWordSelectionIndex(source, pos.Column);
+        if (index < 0 || index >= source.Length)
+            return false;
+
+        if (char.IsWhiteSpace(source[index]))
+            return false;
+
+        int start = index;
+        int end = index + 1;
+
+        if (IsWordSelectionChar(source[index]))
+        {
+            while (start > 0 && IsWordSelectionChar(source[start - 1]))
+                start--;
+
+            while (end < source.Length && IsWordSelectionChar(source[end]))
+                end++;
+        }
+        else
+        {
+            while (start > 0 && !char.IsWhiteSpace(source[start - 1]) && !IsWordSelectionChar(source[start - 1]))
+                start--;
+
+            while (end < source.Length && !char.IsWhiteSpace(source[end]) && !IsWordSelectionChar(source[end]))
+                end++;
+        }
+
+        if (end <= start)
+            return false;
+
+        _state.Restore(
+            new MarkdownPosition(line.SourceLine, end),
+            new MarkdownPosition(line.SourceLine, start),
+            _doc);
+
+        RefreshLayoutForCaretContext();
+        ResetCaretBlink();
+        EnsureCaretVisible();
+        Invalidate();
+        return true;
+    }
+
+    private static int ResolveWordSelectionIndex(string source, int column)
+    {
+        if (string.IsNullOrEmpty(source))
+            return -1;
+
+        int idx = Math.Clamp(column, 0, source.Length);
+        if (idx >= source.Length)
+            idx = source.Length - 1;
+
+        if (!char.IsWhiteSpace(source[idx]))
+            return idx;
+
+        if (idx > 0 && !char.IsWhiteSpace(source[idx - 1]))
+            return idx - 1;
+
+        if (idx + 1 < source.Length && !char.IsWhiteSpace(source[idx + 1]))
+            return idx + 1;
+
+        return idx;
+    }
+
+    private static bool IsWordSelectionChar(char ch)
+        => char.IsLetterOrDigit(ch) || ch == '_';
 
     protected override void OnKeyPress(KeyPressEventArgs e)
     {
