@@ -85,6 +85,7 @@ public sealed class TableCellLine
     public required int HiddenLeadingVisualCount { get; init; }
     public required float[] VisualOffsets { get; init; }
     public required Rectangle Bounds { get; set; }
+    public required Rectangle ClipBounds { get; set; }
     public required int TextWidth { get; init; }
 }
 
@@ -160,6 +161,25 @@ public sealed class TableLayout
             {
                 Rectangle rect = _cellRects[r, c];
                 _cellRects[r, c] = new Rectangle(rect.X, rect.Y + deltaY, rect.Width, rect.Height);
+
+                IReadOnlyList<TableCellLine> lines = _cellLines[r, c];
+                for (int i = 0; i < lines.Count; i++)
+                {
+                    TableCellLine line = lines[i];
+                    Rectangle lineBounds = line.Bounds;
+                    line.Bounds = new Rectangle(
+                        lineBounds.X,
+                        lineBounds.Y + deltaY,
+                        lineBounds.Width,
+                        lineBounds.Height);
+
+                    Rectangle clipBounds = line.ClipBounds;
+                    line.ClipBounds = new Rectangle(
+                        clipBounds.X,
+                        clipBounds.Y + deltaY,
+                        clipBounds.Width,
+                        clipBounds.Height);
+                }
             }
         }
     }
@@ -243,6 +263,7 @@ public sealed class LayoutEngine
     private readonly record struct FenceMarker(int Col, int Len, char Char);
 
     private const int TableCodeChipPadX = 4;
+    private const int TableTextMeasureSlack = 2;
     private const int InlineCodeChipPadX = 4;
     private const float FootnoteFontScale = 0.82f;
     private const int ImagePreviewMaxWidth = 720;
@@ -283,13 +304,15 @@ public sealed class LayoutEngine
     {
         if (runs.Count == 0) return 0;
 
-        int width = 0;
+        float width = 0f;
         var cache = new Dictionary<int, Font>();
 
         try
         {
-            foreach (var run in runs)
+            for (int i = 0; i < runs.Count; i++)
             {
+                InlineRun run = runs[i];
+
                 if (run.IsImage)
                 {
                     width += InlineImageMetrics.CalculateSize(run.Source, _imageSizeProvider).Width;
@@ -314,10 +337,22 @@ public sealed class LayoutEngine
                     cache[key] = f;
                 }
 
-                int w = MeasureWidth(graphics, run.Text, f);
-                if (isCode) w += TableCodeChipPadX * 2;
+                float advanceWidth = MeasureAdvanceWidth(graphics, run.Text, f);
+                if (isCode)
+                {
+                    width += advanceWidth + TableCodeChipPadX * 2;
+                    continue;
+                }
 
-                width += w;
+                if (i == runs.Count - 1)
+                {
+                    float inkWidth = MeasureInkWidth(graphics, run.Text, f);
+                    width += Math.Max(advanceWidth, inkWidth);
+                }
+                else
+                {
+                    width += advanceWidth;
+                }
             }
         }
         finally
@@ -326,7 +361,7 @@ public sealed class LayoutEngine
                 f.Dispose();
         }
 
-        return width;
+        return Math.Max(1, (int)Math.Ceiling(width)) + TableTextMeasureSlack;
     }
 
     // ------------------------------------------------------------
@@ -793,7 +828,7 @@ public sealed class LayoutEngine
 
             try
             {
-                bool eagerLineRealization = !_canSideScroll || ShouldRealizeLineEagerly(lineIdx, y, viewport, preferredSourceLine);
+                bool eagerLineRealization = ShouldRealizeLineEagerly(lineIdx, y, viewport, preferredSourceLine);
                 int left = sem.Kind switch
                 {
                     MarkdownBlockKind.Quote => 24,
@@ -1013,7 +1048,8 @@ public sealed class LayoutEngine
                 int lineHeight;
                 int textWidth;
                 IReadOnlyList<LayoutSegment> segments = Array.Empty<LayoutSegment>();
-                bool eagerVisualOffsets = !_canSideScroll || ShouldMeasureVisualOffsetsEagerly(lineIdx, y, viewport, preferredSourceLine);
+                bool eagerVisualOffsets = eagerLineRealization &&
+                    ShouldMeasureVisualOffsetsEagerly(lineIdx, y, viewport, preferredSourceLine);
                 float[] visualOffsets = eagerVisualOffsets
                     ? BuildVisualOffsets(proj.DisplayText, runs, measureFont, measurementGraphics, preferExactPlainTextMeasurement: sem.Kind == MarkdownBlockKind.Heading)
                     : Array.Empty<float>();
@@ -1039,7 +1075,7 @@ public sealed class LayoutEngine
                     {
                         textWidth = Math.Max(1, viewport.Width - left - 12);
                     }
-                    else if (!_canSideScroll)
+                    else if (!_canSideScroll && eagerLineRealization)
                     {
                         (segments, textWidth, lineHeight) = BuildWrappedSegments(
                             proj.DisplayText,
@@ -1050,6 +1086,23 @@ public sealed class LayoutEngine
                             sem.Kind,
                             left,
                             y);
+                    }
+                    else if (!_canSideScroll)
+                    {
+                        lineRealized = false;
+                        EstimateWrappedLineLayout(
+                            proj.DisplayText,
+                            runs,
+                            measureFont,
+                            measurementGraphics,
+                            sem.Kind,
+                            left,
+                            avgCharWidth,
+                            out textWidth,
+                            out lineHeight);
+
+                        if (!lineRealized && proj.DisplayText.Contains("![", StringComparison.Ordinal))
+                            lineHeight = Math.Max(lineHeight, InlineImageMetrics.MaxHeight + 4);
                     }
                     else if (eagerVisualOffsets)
                     {
@@ -1643,6 +1696,7 @@ public sealed class LayoutEngine
                     HiddenLeadingVisualCount = 0,
                     VisualOffsets = visualOffsets,
                     Bounds = new Rectangle(0, 0, fullWidth, height),
+                    ClipBounds = new Rectangle(0, 0, fullWidth, height),
                     TextWidth = fullWidth
                 }
             ];
@@ -1678,6 +1732,7 @@ public sealed class LayoutEngine
                 HiddenLeadingVisualCount = hiddenLeading,
                 VisualOffsets = lineOffsets,
                 Bounds = new Rectangle(0, 0, Math.Max(1, lineWidth), lineHeight),
+                ClipBounds = new Rectangle(0, 0, Math.Max(1, lineWidth), lineHeight),
                 TextWidth = Math.Max(1, lineWidth)
             });
 
@@ -1746,6 +1801,7 @@ public sealed class LayoutEngine
 
             x = Math.Max(textRect.Left, x);
             line.Bounds = new Rectangle(x, y, width, Math.Max(1, line.Bounds.Height));
+            line.ClipBounds = new Rectangle(textRect.Left, y, Math.Max(1, textRect.Width), Math.Max(1, line.Bounds.Height));
             y += line.Bounds.Height;
         }
     }
@@ -2178,6 +2234,36 @@ public sealed class LayoutEngine
             height += 2;
 
         return Math.Max(1, height);
+    }
+
+    private void EstimateWrappedLineLayout(
+        string displayText,
+        IReadOnlyList<InlineRun> runs,
+        Font measureFont,
+        Graphics graphics,
+        MarkdownBlockKind kind,
+        int left,
+        float avgCharWidth,
+        out int textWidth,
+        out int lineHeight)
+    {
+        int availableWidth = Math.Max(1, _lastViewport.Width - left - 12);
+        int singleLineHeight = MeasureInlineRunsContentHeight(runs, measureFont, graphics) + 4;
+        if (kind == MarkdownBlockKind.Heading)
+            singleLineHeight += 2;
+
+        if (displayText.Length == 0)
+        {
+            textWidth = 1;
+            lineHeight = Math.Max(1, singleLineHeight);
+            return;
+        }
+
+        int estimatedUnwrappedWidth = Math.Max(1, EstimateTextWidth(displayText, avgCharWidth));
+        int estimatedVisualLines = Math.Max(1, (int)Math.Ceiling(estimatedUnwrappedWidth / (double)availableWidth));
+
+        textWidth = Math.Max(1, Math.Min(availableWidth, estimatedUnwrappedWidth));
+        lineHeight = Math.Max(1, singleLineHeight * estimatedVisualLines);
     }
 
     private static IReadOnlyList<InlineRun> SliceInlineRuns(IReadOnlyList<InlineRun> runs, int visualStart, int visualEnd)

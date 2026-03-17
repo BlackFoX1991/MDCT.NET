@@ -3584,7 +3584,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         {
             if (line.InlineRuns.Count > 0)
             {
-                DrawInlineRunsInCell(g, line.InlineRuns, baseFont, new Point(line.Bounds.X, line.Bounds.Y), line.Bounds, color);
+                DrawInlineRunsInCell(g, line.InlineRuns, baseFont, new Point(line.Bounds.X, line.Bounds.Y), line.ClipBounds, color);
                 continue;
             }
 
