@@ -1,5 +1,7 @@
 # MDCT.NET
 
+![PREVIEW](https://github.com/BlackFoX1991/MDCT/blob/b1ebcaae2fc1f6c424dc890bbb7921ec0c87b040/PREVIEW0.png)
+
 MDCT.NET is a Windows Forms Markdown project made up of two parts:
 
 - `MarkdownControlNET`: an editable Markdown control that renders Markdown as a formatted document while keeping the original source editable.
