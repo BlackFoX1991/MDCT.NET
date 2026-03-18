@@ -63,6 +63,11 @@ public partial class frmMain : Form
     private Font? _printRendererFont;
     private Color _lastForegroundColor = Color.FromArgb(50, 168, 82);
     private Color _lastBackgroundColor = Color.FromArgb(94, 90, 90);
+    private Color _lastFrameBorderColor = Color.FromArgb(47, 93, 255);
+    private Color _lastFrameFillColor = Color.FromArgb(238, 243, 255);
+    private Color _lastProgressBorderColor = Color.FromArgb(80, 120, 200);
+    private Color _lastProgressBarColor = Color.FromArgb(123, 201, 111);
+    private int _lastProgressPercent = 50;
 
     public frmMain()
     {
@@ -139,6 +144,8 @@ public partial class frmMain : Form
         tableDesignerToolStripMenuItem.Click += (_, _) => ShowTableDesigner();
         insertLinkToolStripMenuItem.Click += (_, _) => ShowInsertLinkDialog();
         insertImageToolStripMenuItem.Click += (_, _) => ShowInsertImageDialog();
+        insertFrameToolStripMenuItem.Click += (_, _) => ShowInsertFrameDialog();
+        insertProgressToolStripMenuItem.Click += (_, _) => ShowInsertProgressDialog();
         heading1ToolStripMenuItem.Click += (_, _) => ApplyHeading(1);
         heading2ToolStripMenuItem.Click += (_, _) => ApplyHeading(2);
         heading3ToolStripMenuItem.Click += (_, _) => ApplyHeading(3);
@@ -172,6 +179,8 @@ public partial class frmMain : Form
         findNextToolStripButton.Click += (_, _) => FindNextInActiveDocument();
         linkToolStripButton.Click += (_, _) => ShowInsertLinkDialog();
         imageToolStripButton.Click += (_, _) => ShowInsertImageDialog();
+        frameToolStripButton.Click += (_, _) => ShowInsertFrameDialog();
+        progressToolStripButton.Click += (_, _) => ShowInsertProgressDialog();
         tableToolStripButton.Click += (_, _) => ShowTableDesigner();
         heading1ToolStripDropDownItem.Click += (_, _) => ApplyHeading(1);
         heading2ToolStripDropDownItem.Click += (_, _) => ApplyHeading(2);
@@ -206,6 +215,8 @@ public partial class frmMain : Form
         _editorContextHeadingMenuItem.Image = headingToolStripDropDownButton.Image;
         _editorContextQuoteMenuItem.Image = quoteToolStripButton.Image;
         _editorContextCodeFenceMenuItem.Image = codeFenceToolStripButton.Image;
+        _editorContextInsertFrameMenuItem.DisplayStyle = ToolStripItemDisplayStyle.Text;
+        _editorContextInsertProgressMenuItem.DisplayStyle = ToolStripItemDisplayStyle.Text;
         _editorContextForegroundColorMenuItem.DisplayStyle = ToolStripItemDisplayStyle.Text;
         _editorContextBackgroundColorMenuItem.DisplayStyle = ToolStripItemDisplayStyle.Text;
 
@@ -231,6 +242,8 @@ public partial class frmMain : Form
             new ToolStripSeparator(),
             _editorContextInsertLinkMenuItem,
             _editorContextInsertImageMenuItem,
+            _editorContextInsertFrameMenuItem,
+            _editorContextInsertProgressMenuItem,
             _editorContextForegroundColorMenuItem,
             _editorContextBackgroundColorMenuItem,
             _editorContextInsertTableMenuItem,
@@ -248,6 +261,8 @@ public partial class frmMain : Form
         _editorContextSelectAllMenuItem.Click += (_, _) => ExecuteOnActiveEditor(editor => editor.SelectAllCommand());
         _editorContextInsertLinkMenuItem.Click += (_, _) => ShowInsertLinkDialog();
         _editorContextInsertImageMenuItem.Click += (_, _) => ShowInsertImageDialog();
+        _editorContextInsertFrameMenuItem.Click += (_, _) => ShowInsertFrameDialog();
+        _editorContextInsertProgressMenuItem.Click += (_, _) => ShowInsertProgressDialog();
         _editorContextInsertTableMenuItem.Click += (_, _) => ShowTableDesigner();
         _editorContextHeading1MenuItem.Click += (_, _) => ApplyHeading(1);
         _editorContextHeading2MenuItem.Click += (_, _) => ApplyHeading(2);
@@ -846,6 +861,56 @@ public partial class frmMain : Form
         ShowInsertMediaDialog(InsertMediaKind.Image);
     }
 
+    private void ShowInsertFrameDialog()
+    {
+        padTab? tab = ActiveTab;
+        MarkdownGdiEditor? editor = ActiveEditor;
+        if (tab is null || editor is null)
+            return;
+
+        using var dialog = new InsertFrameDialog(
+            initialText: editor.SelectedText,
+            borderColor: _lastFrameBorderColor,
+            fillColor: _lastFrameFillColor);
+
+        if (dialog.ShowDialog(this) != DialogResult.OK)
+            return;
+
+        editor.InsertMarkdownSnippetCommand(dialog.GeneratedMarkdown);
+        _lastFrameBorderColor = dialog.BorderColor;
+        _lastFrameFillColor = dialog.FillColor;
+
+        FocusEditor(tab);
+        SetStatusMessage("Frame inserted");
+        UpdateUiState();
+    }
+
+    private void ShowInsertProgressDialog()
+    {
+        padTab? tab = ActiveTab;
+        MarkdownGdiEditor? editor = ActiveEditor;
+        if (tab is null || editor is null)
+            return;
+
+        using var dialog = new InsertProgressDialog(
+            initialText: editor.SelectedText,
+            initialPercent: _lastProgressPercent,
+            borderColor: _lastProgressBorderColor,
+            barColor: _lastProgressBarColor);
+
+        if (dialog.ShowDialog(this) != DialogResult.OK)
+            return;
+
+        editor.InsertMarkdownSnippetCommand(dialog.GeneratedMarkdown);
+        _lastProgressPercent = dialog.ProgressPercent;
+        _lastProgressBorderColor = dialog.BorderColor;
+        _lastProgressBarColor = dialog.BarColor;
+
+        FocusEditor(tab);
+        SetStatusMessage("Progress bar inserted");
+        UpdateUiState();
+    }
+
     private void ShowInsertMediaDialog(InsertMediaKind kind)
     {
         padTab? tab = ActiveTab;
@@ -1145,6 +1210,8 @@ public partial class frmMain : Form
         formatToolStripMenuItem.Enabled = hasEditor;
         insertLinkToolStripMenuItem.Enabled = hasEditor;
         insertImageToolStripMenuItem.Enabled = hasEditor;
+        insertFrameToolStripMenuItem.Enabled = hasEditor;
+        insertProgressToolStripMenuItem.Enabled = hasEditor;
         tableDesignerToolStripMenuItem.Enabled = hasEditor;
         headingToolStripMenuItem.Enabled = hasEditor;
         quoteToolStripMenuItem.Enabled = hasEditor;
@@ -1169,6 +1236,8 @@ public partial class frmMain : Form
         findNextToolStripButton.Enabled = hasEditor && editor!.CanFindNext;
         linkToolStripButton.Enabled = hasEditor;
         imageToolStripButton.Enabled = hasEditor;
+        frameToolStripButton.Enabled = hasEditor;
+        progressToolStripButton.Enabled = hasEditor;
         tableToolStripButton.Enabled = hasEditor;
         headingToolStripDropDownButton.Enabled = hasEditor;
         quoteToolStripButton.Enabled = hasEditor;
@@ -1206,6 +1275,8 @@ public partial class frmMain : Form
         _editorContextSelectAllMenuItem.Enabled = hasEditor && editor!.CanSelectAll;
         _editorContextInsertLinkMenuItem.Enabled = hasEditor;
         _editorContextInsertImageMenuItem.Enabled = hasEditor;
+        _editorContextInsertFrameMenuItem.Enabled = hasEditor;
+        _editorContextInsertProgressMenuItem.Enabled = hasEditor;
         _editorContextInsertTableMenuItem.Enabled = hasEditor;
         _editorContextHeadingMenuItem.Enabled = hasEditor;
         _editorContextQuoteMenuItem.Enabled = hasEditor;

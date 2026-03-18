@@ -2613,6 +2613,9 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         if (caretLine < 0 || caretLine >= _doc.LineCount)
             return false;
 
+        if (TryGetContainingFrameBlockRange(caretLine, out startLine, out endLine))
+            return true;
+
         foreach (var b in _doc.Blocks)
         {
             if (caretLine < b.StartLine || caretLine > b.EndLine)
@@ -2638,6 +2641,47 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         }
 
         return false;
+    }
+
+    private bool TryGetContainingFrameBlockRange(int caretLine, out int startLine, out int endLine)
+    {
+        startLine = -1;
+        endLine = -1;
+
+        if (caretLine < 0 || caretLine >= _doc.LineCount)
+            return false;
+
+        Stack<int>? openFrames = null;
+        int bestSpanLength = int.MaxValue;
+
+        for (int line = 0; line < _doc.LineCount; line++)
+        {
+            string source = _doc.GetLine(line);
+
+            if (InlineMarkdown.TryParseFrameBlockOpenLine(source, out _, out _))
+            {
+                openFrames ??= new Stack<int>();
+                openFrames.Push(line);
+                continue;
+            }
+
+            if (!InlineMarkdown.IsFrameBlockCloseLine(source) || openFrames is null || openFrames.Count == 0)
+                continue;
+
+            int openLine = openFrames.Pop();
+            if (caretLine < openLine || caretLine > line)
+                continue;
+
+            int spanLength = line - openLine;
+            if (spanLength >= bestSpanLength)
+                continue;
+
+            bestSpanLength = spanLength;
+            startLine = openLine;
+            endLine = line;
+        }
+
+        return startLine >= 0 && endLine >= startLine;
     }
 
     private IReadOnlySet<int>? GetEffectiveRawSourceLinesForCaretBlock()

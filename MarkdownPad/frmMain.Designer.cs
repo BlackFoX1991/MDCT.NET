@@ -58,6 +58,8 @@ namespace MarkdownPad
             formatToolStripMenuItem = new ToolStripMenuItem();
             insertLinkToolStripMenuItem = new ToolStripMenuItem();
             insertImageToolStripMenuItem = new ToolStripMenuItem();
+            insertFrameToolStripMenuItem = new ToolStripMenuItem();
+            insertProgressToolStripMenuItem = new ToolStripMenuItem();
             _foregroundColorToolStripMenuItem = new ToolStripMenuItem();
             _backgroundColorToolStripMenuItem = new ToolStripMenuItem();
             formatToolStripSeparator0 = new ToolStripSeparator();
@@ -97,6 +99,8 @@ namespace MarkdownPad
             toolStripSeparator3 = new ToolStripSeparator();
             linkToolStripButton = new ToolStripButton();
             imageToolStripButton = new ToolStripButton();
+            frameToolStripButton = new ToolStripButton();
+            progressToolStripButton = new ToolStripButton();
             _foregroundColorToolStripButton = new ToolStripButton();
             _backgroundColorToolStripButton = new ToolStripButton();
             toolStripSeparator9 = new ToolStripSeparator();
@@ -126,6 +130,8 @@ namespace MarkdownPad
             themeStatusLabel = new ToolStripLabel();
             toolStripSeparator7 = new ToolStripSeparator();
             messageStatusLabel = new ToolStripLabel();
+            _editorContextInsertFrameMenuItem = new ToolStripMenuItem();
+            _editorContextInsertProgressMenuItem = new ToolStripMenuItem();
             _editorContextForegroundColorMenuItem = new ToolStripMenuItem();
             _editorContextBackgroundColorMenuItem = new ToolStripMenuItem();
             tabContextMenuStrip.SuspendLayout();
@@ -209,7 +215,7 @@ namespace MarkdownPad
             newToolStripMenuItem.Image = (Image)resources.GetObject("newToolStripMenuItem.Image");
             newToolStripMenuItem.Name = "newToolStripMenuItem";
             newToolStripMenuItem.ShortcutKeys = Keys.Control | Keys.N;
-            newToolStripMenuItem.Size = new Size(240, 22);
+            newToolStripMenuItem.Size = new Size(244, 26);
             newToolStripMenuItem.Text = "&New";
             // 
             // openToolStripMenuItem
@@ -217,26 +223,26 @@ namespace MarkdownPad
             openToolStripMenuItem.Image = (Image)resources.GetObject("openToolStripMenuItem.Image");
             openToolStripMenuItem.Name = "openToolStripMenuItem";
             openToolStripMenuItem.ShortcutKeys = Keys.Control | Keys.O;
-            openToolStripMenuItem.Size = new Size(240, 22);
+            openToolStripMenuItem.Size = new Size(244, 26);
             openToolStripMenuItem.Text = "&Open";
             // 
             // fileToolStripSeparator1
             // 
             fileToolStripSeparator1.Name = "fileToolStripSeparator1";
-            fileToolStripSeparator1.Size = new Size(237, 6);
+            fileToolStripSeparator1.Size = new Size(241, 6);
             // 
             // saveToolStripMenuItem
             // 
             saveToolStripMenuItem.Image = (Image)resources.GetObject("saveToolStripMenuItem.Image");
             saveToolStripMenuItem.Name = "saveToolStripMenuItem";
             saveToolStripMenuItem.ShortcutKeys = Keys.Control | Keys.S;
-            saveToolStripMenuItem.Size = new Size(240, 22);
+            saveToolStripMenuItem.Size = new Size(244, 26);
             saveToolStripMenuItem.Text = "&Save";
             // 
             // saveAsToolStripMenuItem
             // 
             saveAsToolStripMenuItem.Name = "saveAsToolStripMenuItem";
-            saveAsToolStripMenuItem.Size = new Size(240, 22);
+            saveAsToolStripMenuItem.Size = new Size(244, 26);
             saveAsToolStripMenuItem.Text = "Save &As";
             // 
             // saveAllToolStripMenuItem
@@ -244,64 +250,64 @@ namespace MarkdownPad
             saveAllToolStripMenuItem.Image = (Image)resources.GetObject("saveAllToolStripMenuItem.Image");
             saveAllToolStripMenuItem.Name = "saveAllToolStripMenuItem";
             saveAllToolStripMenuItem.ShortcutKeys = Keys.Control | Keys.Shift | Keys.S;
-            saveAllToolStripMenuItem.Size = new Size(240, 22);
+            saveAllToolStripMenuItem.Size = new Size(244, 26);
             saveAllToolStripMenuItem.Text = "Save A&ll";
             // 
             // fileToolStripSeparator2
             // 
             fileToolStripSeparator2.Name = "fileToolStripSeparator2";
-            fileToolStripSeparator2.Size = new Size(237, 6);
+            fileToolStripSeparator2.Size = new Size(241, 6);
             // 
             // closeTabToolStripMenuItem
             // 
             closeTabToolStripMenuItem.Image = (Image)resources.GetObject("closeTabToolStripMenuItem.Image");
             closeTabToolStripMenuItem.Name = "closeTabToolStripMenuItem";
             closeTabToolStripMenuItem.ShortcutKeys = Keys.Control | Keys.W;
-            closeTabToolStripMenuItem.Size = new Size(240, 22);
+            closeTabToolStripMenuItem.Size = new Size(244, 26);
             closeTabToolStripMenuItem.Text = "Close";
             // 
             // closeAllTabsToolStripMenuItem
             // 
             closeAllTabsToolStripMenuItem.Name = "closeAllTabsToolStripMenuItem";
-            closeAllTabsToolStripMenuItem.Size = new Size(240, 22);
+            closeAllTabsToolStripMenuItem.Size = new Size(244, 26);
             closeAllTabsToolStripMenuItem.Text = "Close All";
             // 
             // closeOtherTabsToolStripMenuItem
             // 
             closeOtherTabsToolStripMenuItem.Name = "closeOtherTabsToolStripMenuItem";
-            closeOtherTabsToolStripMenuItem.Size = new Size(240, 22);
+            closeOtherTabsToolStripMenuItem.Size = new Size(244, 26);
             closeOtherTabsToolStripMenuItem.Text = "Close Others";
             // 
             // fileToolStripSeparator3
             // 
             fileToolStripSeparator3.Name = "fileToolStripSeparator3";
-            fileToolStripSeparator3.Size = new Size(237, 6);
+            fileToolStripSeparator3.Size = new Size(241, 6);
             // 
             // printToolStripMenuItem
             // 
             printToolStripMenuItem.Image = (Image)resources.GetObject("printToolStripMenuItem.Image");
             printToolStripMenuItem.Name = "printToolStripMenuItem";
             printToolStripMenuItem.ShortcutKeys = Keys.Control | Keys.P;
-            printToolStripMenuItem.Size = new Size(240, 22);
+            printToolStripMenuItem.Size = new Size(244, 26);
             printToolStripMenuItem.Text = "&Print";
             // 
             // printPreviewToolStripMenuItem
             // 
             printPreviewToolStripMenuItem.Image = (Image)resources.GetObject("printPreviewToolStripMenuItem.Image");
             printPreviewToolStripMenuItem.Name = "printPreviewToolStripMenuItem";
-            printPreviewToolStripMenuItem.Size = new Size(240, 22);
+            printPreviewToolStripMenuItem.Size = new Size(244, 26);
             printPreviewToolStripMenuItem.Text = "Print Pre&view";
             // 
             // fileToolStripSeparator4
             // 
             fileToolStripSeparator4.Name = "fileToolStripSeparator4";
-            fileToolStripSeparator4.Size = new Size(237, 6);
+            fileToolStripSeparator4.Size = new Size(241, 6);
             // 
             // exitToolStripMenuItem
             // 
             exitToolStripMenuItem.Image = (Image)resources.GetObject("exitToolStripMenuItem.Image");
             exitToolStripMenuItem.Name = "exitToolStripMenuItem";
-            exitToolStripMenuItem.Size = new Size(240, 22);
+            exitToolStripMenuItem.Size = new Size(244, 26);
             exitToolStripMenuItem.Text = "E&xit";
             // 
             // editToolStripMenuItem
@@ -371,7 +377,7 @@ namespace MarkdownPad
             // 
             // formatToolStripMenuItem
             // 
-            formatToolStripMenuItem.DropDownItems.AddRange(new ToolStripItem[] { insertLinkToolStripMenuItem, insertImageToolStripMenuItem, _foregroundColorToolStripMenuItem, _backgroundColorToolStripMenuItem, formatToolStripSeparator0, tableDesignerToolStripMenuItem, formatToolStripSeparator1, headingToolStripMenuItem, formatToolStripSeparator2, quoteToolStripMenuItem, codeFenceToolStripMenuItem });
+            formatToolStripMenuItem.DropDownItems.AddRange(new ToolStripItem[] { insertLinkToolStripMenuItem, insertImageToolStripMenuItem, insertFrameToolStripMenuItem, insertProgressToolStripMenuItem, _foregroundColorToolStripMenuItem, _backgroundColorToolStripMenuItem, formatToolStripSeparator0, tableDesignerToolStripMenuItem, formatToolStripSeparator1, headingToolStripMenuItem, formatToolStripSeparator2, quoteToolStripMenuItem, codeFenceToolStripMenuItem });
             formatToolStripMenuItem.Name = "formatToolStripMenuItem";
             formatToolStripMenuItem.Size = new Size(57, 20);
             formatToolStripMenuItem.Text = "F&ormat";
@@ -389,6 +395,18 @@ namespace MarkdownPad
             insertImageToolStripMenuItem.ShortcutKeys = Keys.Control | Keys.Shift | Keys.I;
             insertImageToolStripMenuItem.Size = new Size(270, 22);
             insertImageToolStripMenuItem.Text = "Insert Image...";
+            // 
+            // insertFrameToolStripMenuItem
+            // 
+            insertFrameToolStripMenuItem.Name = "insertFrameToolStripMenuItem";
+            insertFrameToolStripMenuItem.Size = new Size(270, 22);
+            insertFrameToolStripMenuItem.Text = "Insert Frame...";
+            // 
+            // insertProgressToolStripMenuItem
+            // 
+            insertProgressToolStripMenuItem.Name = "insertProgressToolStripMenuItem";
+            insertProgressToolStripMenuItem.Size = new Size(270, 22);
+            insertProgressToolStripMenuItem.Text = "Insert Progress...";
             // 
             // _foregroundColorToolStripMenuItem
             // 
@@ -525,7 +543,7 @@ namespace MarkdownPad
             padToolStrip.AutoSize = false;
             padToolStrip.GripStyle = ToolStripGripStyle.Hidden;
             padToolStrip.ImageScalingSize = new Size(20, 20);
-            padToolStrip.Items.AddRange(new ToolStripItem[] { newToolStripButton, openToolStripButton, saveToolStripButton, saveAllToolStripButton, toolStripSeparator1, undoToolStripButton, redoToolStripButton, toolStripSeparator2, cutToolStripButton, copyToolStripButton, pasteToolStripButton, selectAllToolStripButton, toolStripSeparator10, findToolStripButton, findNextToolStripButton, toolStripSeparator3, linkToolStripButton, imageToolStripButton, _foregroundColorToolStripButton, _backgroundColorToolStripButton, toolStripSeparator9, tableToolStripButton, headingToolStripDropDownButton, quoteToolStripButton, codeFenceToolStripButton, toolStripSeparator8, themeToolStripDropDownButton });
+            padToolStrip.Items.AddRange(new ToolStripItem[] { newToolStripButton, openToolStripButton, saveToolStripButton, saveAllToolStripButton, toolStripSeparator1, undoToolStripButton, redoToolStripButton, toolStripSeparator2, cutToolStripButton, copyToolStripButton, pasteToolStripButton, selectAllToolStripButton, toolStripSeparator10, findToolStripButton, findNextToolStripButton, toolStripSeparator3, linkToolStripButton, imageToolStripButton, frameToolStripButton, progressToolStripButton, _foregroundColorToolStripButton, _backgroundColorToolStripButton, toolStripSeparator9, tableToolStripButton, headingToolStripDropDownButton, quoteToolStripButton, codeFenceToolStripButton, toolStripSeparator8, themeToolStripDropDownButton });
             padToolStrip.Location = new Point(0, 24);
             padToolStrip.Name = "padToolStrip";
             padToolStrip.Size = new Size(1063, 72);
@@ -682,6 +700,28 @@ namespace MarkdownPad
             imageToolStripButton.Size = new Size(44, 69);
             imageToolStripButton.Text = "Image";
             // 
+            // frameToolStripButton
+            // 
+            frameToolStripButton.AutoSize = false;
+            frameToolStripButton.DisplayStyle = ToolStripItemDisplayStyle.Image;
+            frameToolStripButton.Image = (Image)resources.GetObject("frameToolStripButton.Image");
+            frameToolStripButton.ImageScaling = ToolStripItemImageScaling.None;
+            frameToolStripButton.Name = "frameToolStripButton";
+            frameToolStripButton.Size = new Size(42, 69);
+            frameToolStripButton.Text = "FR";
+            frameToolStripButton.ToolTipText = "Insert frame...";
+            // 
+            // progressToolStripButton
+            // 
+            progressToolStripButton.AutoSize = false;
+            progressToolStripButton.DisplayStyle = ToolStripItemDisplayStyle.Image;
+            progressToolStripButton.Image = (Image)resources.GetObject("progressToolStripButton.Image");
+            progressToolStripButton.ImageScaling = ToolStripItemImageScaling.None;
+            progressToolStripButton.Name = "progressToolStripButton";
+            progressToolStripButton.Size = new Size(42, 69);
+            progressToolStripButton.Text = "PB";
+            progressToolStripButton.ToolTipText = "Insert progress bar...";
+            // 
             // _foregroundColorToolStripButton
             // 
             _foregroundColorToolStripButton.AutoSize = false;
@@ -796,7 +836,7 @@ namespace MarkdownPad
             themeToolStripDropDownButton.Image = (Image)resources.GetObject("themeToolStripDropDownButton.Image");
             themeToolStripDropDownButton.ImageScaling = ToolStripItemImageScaling.None;
             themeToolStripDropDownButton.Name = "themeToolStripDropDownButton";
-            themeToolStripDropDownButton.Size = new Size(53, 69);
+            themeToolStripDropDownButton.Size = new Size(53, 44);
             themeToolStripDropDownButton.Text = "Theme";
             // 
             // themeSystemToolStripDropDownItem
@@ -891,6 +931,18 @@ namespace MarkdownPad
             messageStatusLabel.Size = new Size(39, 22);
             messageStatusLabel.Text = "Ready";
             // 
+            // _editorContextInsertFrameMenuItem
+            // 
+            _editorContextInsertFrameMenuItem.Name = "_editorContextInsertFrameMenuItem";
+            _editorContextInsertFrameMenuItem.Size = new Size(180, 22);
+            _editorContextInsertFrameMenuItem.Text = "Insert Frame...";
+            // 
+            // _editorContextInsertProgressMenuItem
+            // 
+            _editorContextInsertProgressMenuItem.Name = "_editorContextInsertProgressMenuItem";
+            _editorContextInsertProgressMenuItem.Size = new Size(180, 22);
+            _editorContextInsertProgressMenuItem.Text = "Insert Progress...";
+            // 
             // _editorContextForegroundColorMenuItem
             // 
             _editorContextForegroundColorMenuItem.Name = "_editorContextForegroundColorMenuItem";
@@ -969,6 +1021,8 @@ namespace MarkdownPad
         private ToolStripMenuItem formatToolStripMenuItem;
         private ToolStripMenuItem insertLinkToolStripMenuItem;
         private ToolStripMenuItem insertImageToolStripMenuItem;
+        private ToolStripMenuItem insertFrameToolStripMenuItem;
+        private ToolStripMenuItem insertProgressToolStripMenuItem;
         private ToolStripMenuItem _foregroundColorToolStripMenuItem;
         private ToolStripMenuItem _backgroundColorToolStripMenuItem;
         private ToolStripSeparator formatToolStripSeparator0;
@@ -1006,6 +1060,8 @@ namespace MarkdownPad
         private ToolStripSeparator toolStripSeparator3;
         private ToolStripButton linkToolStripButton;
         private ToolStripButton imageToolStripButton;
+        private ToolStripButton frameToolStripButton;
+        private ToolStripButton progressToolStripButton;
         private ToolStripButton _foregroundColorToolStripButton;
         private ToolStripButton _backgroundColorToolStripButton;
         private ToolStripSeparator toolStripSeparator9;
@@ -1037,6 +1093,8 @@ namespace MarkdownPad
         private ToolStripLabel messageStatusLabel;
         private ToolStripMenuItem helpToolStripMenuItem;
         private ToolStripMenuItem aboutToolStripMenuItem;
+        private ToolStripMenuItem _editorContextInsertFrameMenuItem;
+        private ToolStripMenuItem _editorContextInsertProgressMenuItem;
         private ToolStripMenuItem _editorContextForegroundColorMenuItem;
         private ToolStripMenuItem _editorContextBackgroundColorMenuItem;
     }

@@ -1,9 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(wc:*)",
-      "Bash(ls -lh /c/Users/loewe/source/repos/BlackFoX1991/MDCT/MarkdownControlNET/*.cs)",
-      "Bash(dotnet build:*)"
-    ]
-  }
-}
