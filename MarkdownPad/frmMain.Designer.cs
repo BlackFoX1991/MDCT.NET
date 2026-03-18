@@ -58,6 +58,8 @@ namespace MarkdownPad
             formatToolStripMenuItem = new ToolStripMenuItem();
             insertLinkToolStripMenuItem = new ToolStripMenuItem();
             insertImageToolStripMenuItem = new ToolStripMenuItem();
+            _foregroundColorToolStripMenuItem = new ToolStripMenuItem();
+            _backgroundColorToolStripMenuItem = new ToolStripMenuItem();
             formatToolStripSeparator0 = new ToolStripSeparator();
             tableDesignerToolStripMenuItem = new ToolStripMenuItem();
             formatToolStripSeparator1 = new ToolStripSeparator();
@@ -95,6 +97,8 @@ namespace MarkdownPad
             toolStripSeparator3 = new ToolStripSeparator();
             linkToolStripButton = new ToolStripButton();
             imageToolStripButton = new ToolStripButton();
+            _foregroundColorToolStripButton = new ToolStripButton();
+            _backgroundColorToolStripButton = new ToolStripButton();
             toolStripSeparator9 = new ToolStripSeparator();
             tableToolStripButton = new ToolStripButton();
             headingToolStripDropDownButton = new ToolStripDropDownButton();
@@ -122,6 +126,8 @@ namespace MarkdownPad
             themeStatusLabel = new ToolStripLabel();
             toolStripSeparator7 = new ToolStripSeparator();
             messageStatusLabel = new ToolStripLabel();
+            _editorContextForegroundColorMenuItem = new ToolStripMenuItem();
+            _editorContextBackgroundColorMenuItem = new ToolStripMenuItem();
             tabContextMenuStrip.SuspendLayout();
             padMenu.SuspendLayout();
             padToolStrip.SuspendLayout();
@@ -365,7 +371,7 @@ namespace MarkdownPad
             // 
             // formatToolStripMenuItem
             // 
-            formatToolStripMenuItem.DropDownItems.AddRange(new ToolStripItem[] { insertLinkToolStripMenuItem, insertImageToolStripMenuItem, formatToolStripSeparator0, tableDesignerToolStripMenuItem, formatToolStripSeparator1, headingToolStripMenuItem, formatToolStripSeparator2, quoteToolStripMenuItem, codeFenceToolStripMenuItem });
+            formatToolStripMenuItem.DropDownItems.AddRange(new ToolStripItem[] { insertLinkToolStripMenuItem, insertImageToolStripMenuItem, _foregroundColorToolStripMenuItem, _backgroundColorToolStripMenuItem, formatToolStripSeparator0, tableDesignerToolStripMenuItem, formatToolStripSeparator1, headingToolStripMenuItem, formatToolStripSeparator2, quoteToolStripMenuItem, codeFenceToolStripMenuItem });
             formatToolStripMenuItem.Name = "formatToolStripMenuItem";
             formatToolStripMenuItem.Size = new Size(57, 20);
             formatToolStripMenuItem.Text = "F&ormat";
@@ -383,6 +389,18 @@ namespace MarkdownPad
             insertImageToolStripMenuItem.ShortcutKeys = Keys.Control | Keys.Shift | Keys.I;
             insertImageToolStripMenuItem.Size = new Size(270, 22);
             insertImageToolStripMenuItem.Text = "Insert Image...";
+            // 
+            // _foregroundColorToolStripMenuItem
+            // 
+            _foregroundColorToolStripMenuItem.Name = "_foregroundColorToolStripMenuItem";
+            _foregroundColorToolStripMenuItem.Size = new Size(270, 22);
+            _foregroundColorToolStripMenuItem.Text = "Foreground Color...";
+            // 
+            // _backgroundColorToolStripMenuItem
+            // 
+            _backgroundColorToolStripMenuItem.Name = "_backgroundColorToolStripMenuItem";
+            _backgroundColorToolStripMenuItem.Size = new Size(270, 22);
+            _backgroundColorToolStripMenuItem.Text = "Background Color...";
             // 
             // formatToolStripSeparator0
             // 
@@ -507,7 +525,7 @@ namespace MarkdownPad
             padToolStrip.AutoSize = false;
             padToolStrip.GripStyle = ToolStripGripStyle.Hidden;
             padToolStrip.ImageScalingSize = new Size(20, 20);
-            padToolStrip.Items.AddRange(new ToolStripItem[] { newToolStripButton, openToolStripButton, saveToolStripButton, saveAllToolStripButton, toolStripSeparator1, undoToolStripButton, redoToolStripButton, toolStripSeparator2, cutToolStripButton, copyToolStripButton, pasteToolStripButton, selectAllToolStripButton, toolStripSeparator10, findToolStripButton, findNextToolStripButton, toolStripSeparator3, linkToolStripButton, imageToolStripButton, toolStripSeparator9, tableToolStripButton, headingToolStripDropDownButton, quoteToolStripButton, codeFenceToolStripButton, toolStripSeparator8, themeToolStripDropDownButton });
+            padToolStrip.Items.AddRange(new ToolStripItem[] { newToolStripButton, openToolStripButton, saveToolStripButton, saveAllToolStripButton, toolStripSeparator1, undoToolStripButton, redoToolStripButton, toolStripSeparator2, cutToolStripButton, copyToolStripButton, pasteToolStripButton, selectAllToolStripButton, toolStripSeparator10, findToolStripButton, findNextToolStripButton, toolStripSeparator3, linkToolStripButton, imageToolStripButton, _foregroundColorToolStripButton, _backgroundColorToolStripButton, toolStripSeparator9, tableToolStripButton, headingToolStripDropDownButton, quoteToolStripButton, codeFenceToolStripButton, toolStripSeparator8, themeToolStripDropDownButton });
             padToolStrip.Location = new Point(0, 24);
             padToolStrip.Name = "padToolStrip";
             padToolStrip.Size = new Size(1063, 72);
@@ -663,6 +681,30 @@ namespace MarkdownPad
             imageToolStripButton.Name = "imageToolStripButton";
             imageToolStripButton.Size = new Size(44, 69);
             imageToolStripButton.Text = "Image";
+            // 
+            // _foregroundColorToolStripButton
+            // 
+            _foregroundColorToolStripButton.AutoSize = false;
+            _foregroundColorToolStripButton.DisplayStyle = ToolStripItemDisplayStyle.Image;
+            _foregroundColorToolStripButton.ForeColor = Color.FromArgb(50, 168, 82);
+            _foregroundColorToolStripButton.Image = (Image)resources.GetObject("_foregroundColorToolStripButton.Image");
+            _foregroundColorToolStripButton.ImageScaling = ToolStripItemImageScaling.None;
+            _foregroundColorToolStripButton.Name = "_foregroundColorToolStripButton";
+            _foregroundColorToolStripButton.Size = new Size(44, 69);
+            _foregroundColorToolStripButton.Text = "FG";
+            _foregroundColorToolStripButton.ToolTipText = "Apply foreground color to selected text";
+            // 
+            // _backgroundColorToolStripButton
+            // 
+            _backgroundColorToolStripButton.AutoSize = false;
+            _backgroundColorToolStripButton.BackColor = Color.FromArgb(94, 90, 90);
+            _backgroundColorToolStripButton.DisplayStyle = ToolStripItemDisplayStyle.Image;
+            _backgroundColorToolStripButton.Image = (Image)resources.GetObject("_backgroundColorToolStripButton.Image");
+            _backgroundColorToolStripButton.ImageScaling = ToolStripItemImageScaling.None;
+            _backgroundColorToolStripButton.Name = "_backgroundColorToolStripButton";
+            _backgroundColorToolStripButton.Size = new Size(44, 69);
+            _backgroundColorToolStripButton.Text = "BG";
+            _backgroundColorToolStripButton.ToolTipText = "Apply background color to selected text";
             // 
             // toolStripSeparator9
             // 
@@ -849,6 +891,18 @@ namespace MarkdownPad
             messageStatusLabel.Size = new Size(39, 22);
             messageStatusLabel.Text = "Ready";
             // 
+            // _editorContextForegroundColorMenuItem
+            // 
+            _editorContextForegroundColorMenuItem.Name = "_editorContextForegroundColorMenuItem";
+            _editorContextForegroundColorMenuItem.Size = new Size(180, 22);
+            _editorContextForegroundColorMenuItem.Text = "Foreground Color...";
+            // 
+            // _editorContextBackgroundColorMenuItem
+            // 
+            _editorContextBackgroundColorMenuItem.Name = "_editorContextBackgroundColorMenuItem";
+            _editorContextBackgroundColorMenuItem.Size = new Size(180, 22);
+            _editorContextBackgroundColorMenuItem.Text = "Background Color...";
+            // 
             // frmMain
             // 
             AutoScaleDimensions = new SizeF(7F, 15F);
@@ -863,7 +917,7 @@ namespace MarkdownPad
             MainMenuStrip = padMenu;
             Margin = new Padding(3, 2, 3, 2);
             Name = "frmMain";
-            Text = "MarkdownPad";
+            Text = "MDCT";
             tabContextMenuStrip.ResumeLayout(false);
             padMenu.ResumeLayout(false);
             padMenu.PerformLayout();
@@ -915,6 +969,8 @@ namespace MarkdownPad
         private ToolStripMenuItem formatToolStripMenuItem;
         private ToolStripMenuItem insertLinkToolStripMenuItem;
         private ToolStripMenuItem insertImageToolStripMenuItem;
+        private ToolStripMenuItem _foregroundColorToolStripMenuItem;
+        private ToolStripMenuItem _backgroundColorToolStripMenuItem;
         private ToolStripSeparator formatToolStripSeparator0;
         private ToolStripMenuItem tableDesignerToolStripMenuItem;
         private ToolStripSeparator formatToolStripSeparator1;
@@ -950,6 +1006,8 @@ namespace MarkdownPad
         private ToolStripSeparator toolStripSeparator3;
         private ToolStripButton linkToolStripButton;
         private ToolStripButton imageToolStripButton;
+        private ToolStripButton _foregroundColorToolStripButton;
+        private ToolStripButton _backgroundColorToolStripButton;
         private ToolStripSeparator toolStripSeparator9;
         private ToolStripButton tableToolStripButton;
         private ToolStripDropDownButton headingToolStripDropDownButton;
@@ -979,5 +1037,7 @@ namespace MarkdownPad
         private ToolStripLabel messageStatusLabel;
         private ToolStripMenuItem helpToolStripMenuItem;
         private ToolStripMenuItem aboutToolStripMenuItem;
+        private ToolStripMenuItem _editorContextForegroundColorMenuItem;
+        private ToolStripMenuItem _editorContextBackgroundColorMenuItem;
     }
 }

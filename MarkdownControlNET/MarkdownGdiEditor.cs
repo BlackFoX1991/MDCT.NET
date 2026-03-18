@@ -3357,27 +3357,53 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
             flags);
     }
 
-    private void DrawLinkText(Graphics g, string text, Font font, Point location)
+    private static Color ResolveRunTextColor(InlineRun run, Color fallback)
+        => run.HasForegroundColor ? run.ForegroundColor : fallback;
+
+    private static Rectangle CreateTextBackgroundRectangle(float startX, float endX, int textY, int textHeight)
+    {
+        int rectX = (int)Math.Round(startX);
+        int rectWidth = Math.Max(1, (int)Math.Round(endX - startX));
+        return new Rectangle(rectX, textY, rectWidth, Math.Max(1, textHeight));
+    }
+
+    private static void FillTextBackground(Graphics g, Rectangle rect, Color color)
+    {
+        if (color.IsEmpty || rect.Width <= 0 || rect.Height <= 0)
+            return;
+
+        using var brush = new SolidBrush(color);
+        g.FillRectangle(brush, rect);
+    }
+
+    private void DrawLinkText(Graphics g, string text, Font font, Point location, Color color, Color backgroundColor = default)
     {
         if (string.IsNullOrEmpty(text))
             return;
-
-        DrawTextGdiPlus(g, text, font, location, _linkColor);
 
         int width = MeasureWidth(g, text, font);
         int height = MeasureHeight(g, font);
+
+        FillTextBackground(g, CreateTextBackgroundRectangle(location.X, location.X + width, location.Y, height), backgroundColor);
+        DrawTextGdiPlus(g, text, font, location, color);
+
         int underlineY = location.Y + Math.Max(1, height - 1);
 
-        using var pen = new Pen(_linkColor, 1f);
+        using var pen = new Pen(color, 1f);
         g.DrawLine(pen, location.X, underlineY, location.X + Math.Max(1, width), underlineY);
     }
 
-    private void DrawFootnoteReferenceText(Graphics g, string text, Font font, Point location)
+    private void DrawFootnoteReferenceText(Graphics g, string text, Font font, Point location, Color color, Color backgroundColor = default)
     {
         if (string.IsNullOrEmpty(text))
             return;
 
-        DrawTextGdiPlus(g, text, font, new Point(location.X, location.Y - FootnoteRaiseY), _linkColor);
+        int drawY = location.Y - FootnoteRaiseY;
+        int width = MeasureWidth(g, text, font);
+        int height = MeasureHeight(g, font);
+
+        FillTextBackground(g, CreateTextBackgroundRectangle(location.X, location.X + width, drawY, height), backgroundColor);
+        DrawTextGdiPlus(g, text, font, new Point(location.X, drawY), color);
     }
 
     private Size? TryGetCachedImageSize(string source)
@@ -3767,30 +3793,31 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
 
                 bool isCode = (run.Style & InlineStyle.Code) != 0;
                 Font runFont = GetOrCreateTableRunFont(cache, baseFont, run.Style, isCode, run.IsFootnoteReference);
+                int textW = MeasureWidth(g, run.Text, runFont);
+                int textH = MeasureHeight(g, runFont);
+                Color textColor = ResolveRunTextColor(run, run.IsLink || run.IsFootnoteReference ? _linkColor : color);
 
                 if (run.IsFootnoteReference)
                 {
-                    DrawFootnoteReferenceText(g, run.Text, runFont, new Point(x, start.Y));
-                    x += MeasureWidth(g, run.Text, runFont);
+                    DrawFootnoteReferenceText(g, run.Text, runFont, new Point(x, start.Y), textColor, run.BackgroundColor);
+                    x += textW;
                     continue;
                 }
 
                 if (run.IsLink)
                 {
-                    DrawLinkText(g, run.Text, runFont, new Point(x, start.Y));
-                    x += MeasureWidth(g, run.Text, runFont);
+                    DrawLinkText(g, run.Text, runFont, new Point(x, start.Y), textColor, run.BackgroundColor);
+                    x += textW;
                     continue;
                 }
 
                 if (!isCode)
                 {
-                    DrawTextGdiPlus(g, run.Text, runFont, new Point(x, start.Y), color);
-                    x += MeasureWidth(g, run.Text, runFont);
+                    FillTextBackground(g, CreateTextBackgroundRectangle(x, x + textW, start.Y, textH), run.BackgroundColor);
+                    DrawTextGdiPlus(g, run.Text, runFont, new Point(x, start.Y), textColor);
+                    x += textW;
                     continue;
                 }
-
-                int textW = MeasureWidth(g, run.Text, runFont);
-                int textH = MeasureHeight(g, runFont);
 
                 int chipW = textW + InlineCodePadX * 2;
                 int chipH = Math.Min(clipRectContent.Height, textH + InlineCodePadY * 2);
@@ -3798,11 +3825,15 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
 
                 var chip = new Rectangle(x, chipY, chipW, Math.Max(1, chipH));
 
-                g.FillRectangle(codeBrush, chip);
+                if (run.HasBackgroundColor)
+                    FillTextBackground(g, chip, run.BackgroundColor);
+                else
+                    g.FillRectangle(codeBrush, chip);
+
                 g.DrawRectangle(codePen, chip.X, chip.Y, Math.Max(1, chip.Width - 1), Math.Max(1, chip.Height - 1));
 
                 int textY = chip.Y + Math.Max(0, (chip.Height - textH) / 2);
-                DrawTextGdiPlus(g, run.Text, runFont, new Point(x + InlineCodePadX, textY), color);
+                DrawTextGdiPlus(g, run.Text, runFont, new Point(x + InlineCodePadX, textY), textColor);
 
                 x += chipW;
             }
@@ -5793,25 +5824,28 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
                 bool isCode = (run.Style & InlineStyle.Code) != 0;
                 Font runFont = GetOrCreateInlineFont(cache, baseFont, run.Style, isCode, run.IsFootnoteReference, _monoFont);
                 int visColEnd = visCol + run.Text.Length;
+                float runEndX = SnapVisualX(baseX + OffsetAt(offsets, visColEnd));
+                int textHeight = MeasureHeight(g, runFont);
+                Color textColor = ResolveRunTextColor(run, run.IsLink || run.IsFootnoteReference ? _linkColor : ForeColor);
 
                 if (run.IsFootnoteReference)
                 {
-                    int runTextY = line.Bounds.Top + Math.Max(0, (line.Bounds.Height - MeasureHeight(g, runFont)) / 2);
-                    DrawTextGdiPlus(g, run.Text, runFont, runX, runTextY - FootnoteRaiseY, _linkColor);
+                    int runTextY = line.Bounds.Top + Math.Max(0, (line.Bounds.Height - textHeight) / 2) - FootnoteRaiseY;
+                    FillTextBackground(g, CreateTextBackgroundRectangle(runX, runEndX, runTextY, textHeight), run.BackgroundColor);
+                    DrawTextGdiPlus(g, run.Text, runFont, runX, runTextY, textColor);
                     visCol = visColEnd;
                     continue;
                 }
 
                 if (run.IsLink)
                 {
-                    int runTextY = line.Bounds.Top + Math.Max(0, (line.Bounds.Height - MeasureHeight(g, runFont)) / 2);
-                    DrawTextGdiPlus(g, run.Text, runFont, runX, runTextY, _linkColor);
+                    int runTextY = line.Bounds.Top + Math.Max(0, (line.Bounds.Height - textHeight) / 2);
+                    FillTextBackground(g, CreateTextBackgroundRectangle(runX, runEndX, runTextY, textHeight), run.BackgroundColor);
+                    DrawTextGdiPlus(g, run.Text, runFont, runX, runTextY, textColor);
 
-                    float runEndX = SnapVisualX(baseX + OffsetAt(offsets, visColEnd));
                     float linkWidth = Math.Max(1f, runEndX - runX);
-                    int height = MeasureHeight(g, runFont);
-                    float underlineY = runTextY + Math.Max(1, height - 1);
-                    using var linkPen = new Pen(_linkColor, 1f);
+                    float underlineY = runTextY + Math.Max(1, textHeight - 1);
+                    using var linkPen = new Pen(textColor, 1f);
                     g.DrawLine(linkPen, runX, underlineY, runX + linkWidth, underlineY);
 
                     visCol = visColEnd;
@@ -5820,27 +5854,30 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
 
                 if (!isCode)
                 {
-                    int runTextY = line.Bounds.Top + Math.Max(0, (line.Bounds.Height - MeasureHeight(g, runFont)) / 2);
-                    DrawTextGdiPlus(g, run.Text, runFont, runX, runTextY, ForeColor);
+                    int runTextY = line.Bounds.Top + Math.Max(0, (line.Bounds.Height - textHeight) / 2);
+                    FillTextBackground(g, CreateTextBackgroundRectangle(runX, runEndX, runTextY, textHeight), run.BackgroundColor);
+                    DrawTextGdiPlus(g, run.Text, runFont, runX, runTextY, textColor);
                     visCol = visColEnd;
                     continue;
                 }
 
                 // Code chip: offsets already include left/right padding
-                float chipEndX = SnapVisualX(baseX + OffsetAt(offsets, visColEnd));
                 int chipXi = (int)Math.Round(runX);
-                int chipWi = Math.Max(1, (int)Math.Round(chipEndX - runX));
-                int textH = MeasureHeight(g, runFont);
-                int chipH = Math.Max(1, textH + InlineCodePadY * 2);
+                int chipWi = Math.Max(1, (int)Math.Round(runEndX - runX));
+                int chipH = Math.Max(1, textHeight + InlineCodePadY * 2);
                 int chipY = contentTextStart.Y + Math.Max(0, (line.Bounds.Height - chipH) / 2);
 
                 var chip = new Rectangle(chipXi, chipY, chipWi, chipH);
 
-                g.FillRectangle(codeBrush, chip);
+                if (run.HasBackgroundColor)
+                    FillTextBackground(g, chip, run.BackgroundColor);
+                else
+                    g.FillRectangle(codeBrush, chip);
+
                 g.DrawRectangle(codePen, chip.X, chip.Y, Math.Max(1, chip.Width - 1), Math.Max(1, chip.Height - 1));
 
-                int textY = chip.Y + Math.Max(0, (chip.Height - textH) / 2);
-                DrawTextGdiPlus(g, run.Text, runFont, runX + InlineCodePadX, textY, ForeColor);
+                int textY = chip.Y + Math.Max(0, (chip.Height - textHeight) / 2);
+                DrawTextGdiPlus(g, run.Text, runFont, runX + InlineCodePadX, textY, textColor);
 
                 visCol = visColEnd;
             }
@@ -5900,25 +5937,28 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
                 bool isCode = (run.Style & InlineStyle.Code) != 0;
                 Font runFont = GetOrCreateInlineFont(cache, baseFont, run.Style, isCode, run.IsFootnoteReference, _monoFont);
                 int visColEnd = visCol + run.Text.Length;
+                float runEndX = SnapVisualX(baseX + OffsetAt(offsets, visColEnd));
+                int textHeight = MeasureHeight(g, runFont);
+                Color textColor = ResolveRunTextColor(run, run.IsLink || run.IsFootnoteReference ? _linkColor : ForeColor);
 
                 if (run.IsFootnoteReference)
                 {
-                    int runTextY = segment.Bounds.Top + Math.Max(0, (segment.Bounds.Height - MeasureHeight(g, runFont)) / 2);
-                    DrawTextGdiPlus(g, run.Text, runFont, runX, runTextY - FootnoteRaiseY, _linkColor);
+                    int runTextY = segment.Bounds.Top + Math.Max(0, (segment.Bounds.Height - textHeight) / 2) - FootnoteRaiseY;
+                    FillTextBackground(g, CreateTextBackgroundRectangle(runX, runEndX, runTextY, textHeight), run.BackgroundColor);
+                    DrawTextGdiPlus(g, run.Text, runFont, runX, runTextY, textColor);
                     visCol = visColEnd;
                     continue;
                 }
 
                 if (run.IsLink)
                 {
-                    int runTextY = segment.Bounds.Top + Math.Max(0, (segment.Bounds.Height - MeasureHeight(g, runFont)) / 2);
-                    DrawTextGdiPlus(g, run.Text, runFont, runX, runTextY, _linkColor);
+                    int runTextY = segment.Bounds.Top + Math.Max(0, (segment.Bounds.Height - textHeight) / 2);
+                    FillTextBackground(g, CreateTextBackgroundRectangle(runX, runEndX, runTextY, textHeight), run.BackgroundColor);
+                    DrawTextGdiPlus(g, run.Text, runFont, runX, runTextY, textColor);
 
-                    float runEndX = SnapVisualX(baseX + OffsetAt(offsets, visColEnd));
                     float linkWidth = Math.Max(1f, runEndX - runX);
-                    int height = MeasureHeight(g, runFont);
-                    float underlineY = runTextY + Math.Max(1, height - 1);
-                    using var linkPen = new Pen(_linkColor, 1f);
+                    float underlineY = runTextY + Math.Max(1, textHeight - 1);
+                    using var linkPen = new Pen(textColor, 1f);
                     g.DrawLine(linkPen, runX, underlineY, runX + linkWidth, underlineY);
 
                     visCol = visColEnd;
@@ -5927,26 +5967,29 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
 
                 if (!isCode)
                 {
-                    int runTextY = segment.Bounds.Top + Math.Max(0, (segment.Bounds.Height - MeasureHeight(g, runFont)) / 2);
-                    DrawTextGdiPlus(g, run.Text, runFont, runX, runTextY, ForeColor);
+                    int runTextY = segment.Bounds.Top + Math.Max(0, (segment.Bounds.Height - textHeight) / 2);
+                    FillTextBackground(g, CreateTextBackgroundRectangle(runX, runEndX, runTextY, textHeight), run.BackgroundColor);
+                    DrawTextGdiPlus(g, run.Text, runFont, runX, runTextY, textColor);
                     visCol = visColEnd;
                     continue;
                 }
 
-                float chipEndX = SnapVisualX(baseX + OffsetAt(offsets, visColEnd));
                 int chipXi = (int)Math.Round(runX);
-                int chipWi = Math.Max(1, (int)Math.Round(chipEndX - runX));
-                int textH = MeasureHeight(g, runFont);
-                int chipH = Math.Max(1, textH + InlineCodePadY * 2);
+                int chipWi = Math.Max(1, (int)Math.Round(runEndX - runX));
+                int chipH = Math.Max(1, textHeight + InlineCodePadY * 2);
                 int chipY = contentTextStart.Y + Math.Max(0, (segment.Bounds.Height - chipH) / 2);
 
                 var chip = new Rectangle(chipXi, chipY, chipWi, chipH);
 
-                g.FillRectangle(codeBrush, chip);
+                if (run.HasBackgroundColor)
+                    FillTextBackground(g, chip, run.BackgroundColor);
+                else
+                    g.FillRectangle(codeBrush, chip);
+
                 g.DrawRectangle(codePen, chip.X, chip.Y, Math.Max(1, chip.Width - 1), Math.Max(1, chip.Height - 1));
 
-                int textY = chip.Y + Math.Max(0, (chip.Height - textH) / 2);
-                DrawTextGdiPlus(g, run.Text, runFont, runX + InlineCodePadX, textY, ForeColor);
+                int textY = chip.Y + Math.Max(0, (chip.Height - textHeight) / 2);
+                DrawTextGdiPlus(g, run.Text, runFont, runX + InlineCodePadX, textY, textColor);
 
                 visCol = visColEnd;
             }
@@ -5964,7 +6007,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
             return false;
 
         InlineRun run = line.InlineRuns[0];
-        if (run.IsImage || run.IsLink || run.IsFootnoteReference || run.Style != InlineStyle.None)
+        if (run.IsImage || run.IsLink || run.IsFootnoteReference || run.Style != InlineStyle.None || run.HasCustomColors)
             return false;
 
         if (!string.Equals(run.Text, display, StringComparison.Ordinal))
@@ -5992,7 +6035,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
             return false;
 
         InlineRun run = segment.InlineRuns[0];
-        if (run.IsImage || run.IsLink || run.IsFootnoteReference || run.Style != InlineStyle.None)
+        if (run.IsImage || run.IsLink || run.IsFootnoteReference || run.Style != InlineStyle.None || run.HasCustomColors)
             return false;
 
         if (!string.Equals(run.Text, segment.DisplayText, StringComparison.Ordinal))
@@ -6188,7 +6231,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         }
 
         InlineRun run = line.InlineRuns[0];
-        if (run.IsImage || run.IsLink || run.IsFootnoteReference || run.Style != InlineStyle.None)
+        if (run.IsImage || run.IsLink || run.IsFootnoteReference || run.Style != InlineStyle.None || run.HasCustomColors)
             return false;
 
         if (!string.Equals(run.Text, display, StringComparison.Ordinal))
@@ -6219,7 +6262,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         }
 
         InlineRun run = segment.InlineRuns[0];
-        if (run.IsImage || run.IsLink || run.IsFootnoteReference || run.Style != InlineStyle.None)
+        if (run.IsImage || run.IsLink || run.IsFootnoteReference || run.Style != InlineStyle.None || run.HasCustomColors)
             return false;
 
         if (!string.Equals(run.Text, segment.DisplayText, StringComparison.Ordinal))

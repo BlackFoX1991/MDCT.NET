@@ -8,7 +8,13 @@ namespace MarkdownPad;
 
 public partial class frmMain : Form
 {
-    private const string AppTitle = "MarkdownPad";
+    private const string AppTitle = "MDCT.NET © by A. Löwen";
+    private enum InlineColorTarget
+    {
+        Foreground,
+        Background
+    }
+
     private const int MaxRecentFiles = 12;
     private const int SwRestore = 9;
     private const float DefaultViewScale = 1f;
@@ -55,6 +61,8 @@ public partial class frmMain : Form
     private padTab? _printSourceTab;
     private MarkdownGdiEditor? _printRenderer;
     private Font? _printRendererFont;
+    private Color _lastForegroundColor = Color.FromArgb(50, 168, 82);
+    private Color _lastBackgroundColor = Color.FromArgb(94, 90, 90);
 
     public frmMain()
     {
@@ -139,6 +147,8 @@ public partial class frmMain : Form
         heading6ToolStripMenuItem.Click += (_, _) => ApplyHeading(6);
         quoteToolStripMenuItem.Click += (_, _) => ToggleQuoteBlock();
         codeFenceToolStripMenuItem.Click += (_, _) => WrapSelectionInCodeFence();
+        _foregroundColorToolStripMenuItem.Click += (_, _) => ApplyInlineColor(InlineColorTarget.Foreground);
+        _backgroundColorToolStripMenuItem.Click += (_, _) => ApplyInlineColor(InlineColorTarget.Background);
 
         findToolStripMenuItem.Click += (_, _) => ShowFindDialog();
         findNextToolStripMenuItem.Click += (_, _) => FindNextInActiveDocument();
@@ -171,6 +181,8 @@ public partial class frmMain : Form
         heading6ToolStripDropDownItem.Click += (_, _) => ApplyHeading(6);
         quoteToolStripButton.Click += (_, _) => ToggleQuoteBlock();
         codeFenceToolStripButton.Click += (_, _) => WrapSelectionInCodeFence();
+        _foregroundColorToolStripButton.Click += (_, _) => ApplyInlineColor(InlineColorTarget.Foreground);
+        _backgroundColorToolStripButton.Click += (_, _) => ApplyInlineColor(InlineColorTarget.Background);
 
         themeSystemToolStripDropDownItem.Click += (_, _) => ApplyTheme(EditorThemeMode.System);
         themeLightToolStripDropDownItem.Click += (_, _) => ApplyTheme(EditorThemeMode.Light);
@@ -194,6 +206,8 @@ public partial class frmMain : Form
         _editorContextHeadingMenuItem.Image = headingToolStripDropDownButton.Image;
         _editorContextQuoteMenuItem.Image = quoteToolStripButton.Image;
         _editorContextCodeFenceMenuItem.Image = codeFenceToolStripButton.Image;
+        _editorContextForegroundColorMenuItem.DisplayStyle = ToolStripItemDisplayStyle.Text;
+        _editorContextBackgroundColorMenuItem.DisplayStyle = ToolStripItemDisplayStyle.Text;
 
         _editorContextHeadingMenuItem.DropDownItems.AddRange(
         [
@@ -217,6 +231,8 @@ public partial class frmMain : Form
             new ToolStripSeparator(),
             _editorContextInsertLinkMenuItem,
             _editorContextInsertImageMenuItem,
+            _editorContextForegroundColorMenuItem,
+            _editorContextBackgroundColorMenuItem,
             _editorContextInsertTableMenuItem,
             new ToolStripSeparator(),
             _editorContextHeadingMenuItem,
@@ -241,6 +257,8 @@ public partial class frmMain : Form
         _editorContextHeading6MenuItem.Click += (_, _) => ApplyHeading(6);
         _editorContextQuoteMenuItem.Click += (_, _) => ToggleQuoteBlock();
         _editorContextCodeFenceMenuItem.Click += (_, _) => WrapSelectionInCodeFence();
+        _editorContextForegroundColorMenuItem.Click += (_, _) => ApplyInlineColor(InlineColorTarget.Foreground);
+        _editorContextBackgroundColorMenuItem.Click += (_, _) => ApplyInlineColor(InlineColorTarget.Background);
         _editorContextMenuStrip.Opening += EditorContextMenuStrip_Opening;
     }
 
@@ -1104,6 +1122,7 @@ public partial class frmMain : Form
         padTab? tab = ActiveTab;
         MarkdownGdiEditor? editor = tab?.Editor;
         bool hasEditor = editor is not null;
+        bool hasSelection = hasEditor && editor!.HasSelection;
         bool hasDirtyTabs = OpenTabs.Any(NeedsSaving);
         bool hasMultipleTabs = tabControl1.TabPages.Count > 1;
 
@@ -1130,6 +1149,8 @@ public partial class frmMain : Form
         headingToolStripMenuItem.Enabled = hasEditor;
         quoteToolStripMenuItem.Enabled = hasEditor;
         codeFenceToolStripMenuItem.Enabled = hasEditor;
+        _foregroundColorToolStripMenuItem.Enabled = hasSelection;
+        _backgroundColorToolStripMenuItem.Enabled = hasSelection;
 
         findToolStripMenuItem.Enabled = hasEditor;
         findNextToolStripMenuItem.Enabled = hasEditor && editor!.CanFindNext;
@@ -1152,6 +1173,8 @@ public partial class frmMain : Form
         headingToolStripDropDownButton.Enabled = hasEditor;
         quoteToolStripButton.Enabled = hasEditor;
         codeFenceToolStripButton.Enabled = hasEditor;
+        _foregroundColorToolStripButton.Enabled = hasSelection;
+        _backgroundColorToolStripButton.Enabled = hasSelection;
 
         closeContextTabToolStripMenuItem.Enabled = tab is not null;
         closeOtherContextTabsToolStripMenuItem.Enabled = hasMultipleTabs;
@@ -1173,6 +1196,7 @@ public partial class frmMain : Form
     private void UpdateEditorContextMenuState(MarkdownGdiEditor? editor)
     {
         bool hasEditor = editor is not null;
+        bool hasSelection = hasEditor && editor!.HasSelection;
 
         _editorContextUndoMenuItem.Enabled = hasEditor && editor!.CanUndo;
         _editorContextRedoMenuItem.Enabled = hasEditor && editor!.CanRedo;
@@ -1186,6 +1210,8 @@ public partial class frmMain : Form
         _editorContextHeadingMenuItem.Enabled = hasEditor;
         _editorContextQuoteMenuItem.Enabled = hasEditor;
         _editorContextCodeFenceMenuItem.Enabled = hasEditor;
+        _editorContextForegroundColorMenuItem.Enabled = hasSelection;
+        _editorContextBackgroundColorMenuItem.Enabled = hasSelection;
     }
 
     private void UpdateStatusBar()
@@ -1549,6 +1575,98 @@ public partial class frmMain : Form
         if (recentIndex >= 0)
             fileToolStripMenuItem.DropDownItems.Insert(recentIndex, _recentToolStripMenuItem);
     }
+
+    private void ApplyInlineColor(InlineColorTarget target)
+    {
+        padTab? tab = ActiveTab;
+        MarkdownGdiEditor? editor = ActiveEditor;
+        if (tab is null || editor is null)
+            return;
+
+        if (!editor.HasSelection || string.IsNullOrEmpty(editor.SelectedText))
+        {
+            SetStatusMessage("Select text before applying a color");
+            FocusEditor(tab);
+            return;
+        }
+
+        Color initialColor = target == InlineColorTarget.Foreground
+            ? _lastForegroundColor
+            : _lastBackgroundColor;
+
+        if (!TryPickColor(initialColor, out Color chosenColor))
+        {
+            FocusEditor(tab);
+            return;
+        }
+
+        string token = target == InlineColorTarget.Foreground ? "FG" : "BG";
+        string wrapped = WrapSelectedTextWithColor(editor.SelectedText, token, chosenColor);
+
+        editor.InsertMarkdownSnippetCommand(wrapped);
+
+        if (target == InlineColorTarget.Foreground)
+        {
+            _lastForegroundColor = chosenColor;
+            _foregroundColorToolStripButton.ForeColor = chosenColor;
+        }
+        else
+        {
+            _lastBackgroundColor = chosenColor;
+            _backgroundColorToolStripButton.BackColor = chosenColor;
+        }
+
+        FocusEditor(tab);
+        SetStatusMessage(target == InlineColorTarget.Foreground
+            ? "Foreground color applied"
+            : "Background color applied");
+        UpdateUiState();
+    }
+
+    private bool TryPickColor(Color initialColor, out Color color)
+    {
+        using var dialog = new ColorDialog
+        {
+            AllowFullOpen = true,
+            AnyColor = true,
+            FullOpen = true,
+            Color = initialColor
+        };
+
+        if (dialog.ShowDialog(this) != DialogResult.OK)
+        {
+            color = initialColor;
+            return false;
+        }
+
+        color = dialog.Color;
+        return true;
+    }
+
+    private static string ColorToMarkdownHex(Color color)
+        => $"#{color.R:X2}{color.G:X2}{color.B:X2}";
+
+    private static string WrapSelectedTextWithColor(string selectedText, string token, Color color)
+    {
+        string normalized = (selectedText ?? string.Empty)
+            .Replace("\r\n", "\n", StringComparison.Ordinal)
+            .Replace('\r', '\n');
+
+        if (normalized.IndexOf('\n') < 0)
+            return BuildColorWrapper(token, color, normalized);
+
+        string[] lines = normalized.Split('\n');
+        for (int i = 0; i < lines.Length; i++)
+        {
+            if (!string.IsNullOrEmpty(lines[i]))
+                lines[i] = BuildColorWrapper(token, color, lines[i]);
+        }
+
+        return string.Join('\n', lines);
+    }
+
+    private static string BuildColorWrapper(string token, Color color, string text)
+        => $"![{token}:{ColorToMarkdownHex(color)}]({text})";
 
     private void HandleMarkdownLink(padTab? sourceTab, LinkActivatedEventArgs e)
     {

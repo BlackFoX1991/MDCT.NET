@@ -27,7 +27,7 @@ public readonly record struct InlineRun
 {
     private const string ImagePlaceholderText = "\uFFFC";
 
-    public InlineRun(string text, InlineStyle style)
+    public InlineRun(string text, InlineStyle style, Color foregroundColor = default, Color backgroundColor = default)
     {
         Kind = InlineRunKind.Text;
         Text = text ?? string.Empty;
@@ -35,9 +35,19 @@ public readonly record struct InlineRun
         AltText = string.Empty;
         Source = string.Empty;
         Href = string.Empty;
+        ForegroundColor = foregroundColor;
+        BackgroundColor = backgroundColor;
     }
 
-    private InlineRun(InlineRunKind kind, string text, InlineStyle style, string altText, string source, string href)
+    private InlineRun(
+        InlineRunKind kind,
+        string text,
+        InlineStyle style,
+        string altText,
+        string source,
+        string href,
+        Color foregroundColor,
+        Color backgroundColor)
     {
         Kind = kind;
         Text = text ?? string.Empty;
@@ -45,6 +55,8 @@ public readonly record struct InlineRun
         AltText = altText ?? string.Empty;
         Source = source ?? string.Empty;
         Href = href ?? string.Empty;
+        ForegroundColor = foregroundColor;
+        BackgroundColor = backgroundColor;
     }
 
     public InlineRunKind Kind { get; }
@@ -53,20 +65,25 @@ public readonly record struct InlineRun
     public string AltText { get; }
     public string Source { get; }
     public string Href { get; }
+    public Color ForegroundColor { get; }
+    public Color BackgroundColor { get; }
 
     public bool IsImage => Kind == InlineRunKind.Image;
     public bool IsLink => Kind == InlineRunKind.Link || Kind == InlineRunKind.FootnoteReference;
     public bool IsFootnoteReference => Kind == InlineRunKind.FootnoteReference;
+    public bool HasForegroundColor => !ForegroundColor.IsEmpty;
+    public bool HasBackgroundColor => !BackgroundColor.IsEmpty;
+    public bool HasCustomColors => HasForegroundColor || HasBackgroundColor;
     public int VisualLength => Text.Length;
 
-    public static InlineRun Image(string altText, string source, InlineStyle style)
-        => new(InlineRunKind.Image, ImagePlaceholderText, style, altText, source, string.Empty);
+    public static InlineRun Image(string altText, string source, InlineStyle style, Color foregroundColor = default, Color backgroundColor = default)
+        => new(InlineRunKind.Image, ImagePlaceholderText, style, altText, source, string.Empty, foregroundColor, backgroundColor);
 
-    public static InlineRun Link(string text, string href, InlineStyle style)
-        => new(InlineRunKind.Link, text, style, string.Empty, string.Empty, href);
+    public static InlineRun Link(string text, string href, InlineStyle style, Color foregroundColor = default, Color backgroundColor = default)
+        => new(InlineRunKind.Link, text, style, string.Empty, string.Empty, href, foregroundColor, backgroundColor);
 
-    public static InlineRun FootnoteReference(string text, string href, InlineStyle style)
-        => new(InlineRunKind.FootnoteReference, text, style, string.Empty, string.Empty, href);
+    public static InlineRun FootnoteReference(string text, string href, InlineStyle style, Color foregroundColor = default, Color backgroundColor = default)
+        => new(InlineRunKind.FootnoteReference, text, style, string.Empty, string.Empty, href, foregroundColor, backgroundColor);
 }
 
 public sealed record InlineParseResult(
@@ -79,6 +96,9 @@ public sealed record InlineParseResult(
 public static class InlineMarkdown
 {
     public static InlineParseResult Parse(string input)
+        => ParseCore(input);
+
+    private static InlineParseResult ParseCore(string input)
     {
         input ??= string.Empty;
 
@@ -164,6 +184,45 @@ public static class InlineMarkdown
                     sourceToVisual[closeMarkerPos + k] = outPos;
 
                 i = closeMarkerPos + codeMarkerLen;
+                continue;
+            }
+
+            if (TryReadColorSpan(
+                input,
+                i,
+                out int colorEndExclusive,
+                out int colorContentStart,
+                out int colorContentEnd,
+                out Color colorValue,
+                out bool isForegroundColor))
+            {
+                FlushRun();
+
+                for (int s = i; s < colorContentStart; s++)
+                    sourceToVisual[s + 1] = outPos;
+
+                InlineParseResult nested = ParseCore(input[colorContentStart..colorContentEnd]);
+                foreach (InlineRun nestedRun in nested.Runs)
+                {
+                    runs.Add(ApplyColorPresentation(
+                        nestedRun,
+                        style,
+                        isForegroundColor ? colorValue : Color.Empty,
+                        isForegroundColor ? Color.Empty : colorValue));
+                }
+
+                for (int s = 0; s <= (colorContentEnd - colorContentStart); s++)
+                    sourceToVisual[colorContentStart + s] = outPos + nested.SourceToVisual[s];
+
+                for (int v = 1; v < nested.VisualToSource.Length; v++)
+                    visualToSource.Add(colorContentStart + nested.VisualToSource[v]);
+
+                outPos += nested.Text.Length;
+
+                for (int s = colorContentEnd; s < colorEndExclusive; s++)
+                    sourceToVisual[s + 1] = outPos;
+
+                i = colorEndExclusive;
                 continue;
             }
 
@@ -340,6 +399,136 @@ public static class InlineMarkdown
     private static bool IsEscapable(char c)
         => c is '*' or '_' or '~' or '\\' or '`' or '!' or '[' or ']' or '(' or ')';
 
+    private static InlineRun ApplyColorPresentation(
+        InlineRun run,
+        InlineStyle inheritedStyle,
+        Color foregroundColor,
+        Color backgroundColor)
+    {
+        InlineStyle style = run.Style | inheritedStyle;
+        Color mergedForeground = run.HasForegroundColor ? run.ForegroundColor : foregroundColor;
+        Color mergedBackground = run.HasBackgroundColor ? run.BackgroundColor : backgroundColor;
+
+        if (run.IsFootnoteReference)
+            return InlineRun.FootnoteReference(run.Text, run.Href, style, mergedForeground, mergedBackground);
+
+        if (run.IsLink)
+            return InlineRun.Link(run.Text, run.Href, style, mergedForeground, mergedBackground);
+
+        if (run.IsImage)
+            return InlineRun.Image(run.AltText, run.Source, style, mergedForeground, mergedBackground);
+
+        return new InlineRun(run.Text, style, mergedForeground, mergedBackground);
+    }
+
+    private static bool TryReadColorSpan(
+        string s,
+        int i,
+        out int endExclusive,
+        out int contentStart,
+        out int contentEnd,
+        out Color color,
+        out bool isForegroundColor)
+    {
+        endExclusive = -1;
+        contentStart = -1;
+        contentEnd = -1;
+        color = Color.Empty;
+        isForegroundColor = false;
+
+        if (!TryReadColorDirective(s, i, out int closeBracket, out color, out isForegroundColor))
+            return false;
+
+        if (closeBracket + 1 >= s.Length || s[closeBracket + 1] != '(')
+            return false;
+
+        contentStart = closeBracket + 2;
+        int closeParen = FindImageSourceEnd(s, contentStart);
+        if (closeParen < 0)
+            return false;
+
+        contentEnd = closeParen;
+        endExclusive = closeParen + 1;
+        return true;
+    }
+
+    private static bool TryReadColorDirective(
+        string s,
+        int i,
+        out int closeBracket,
+        out Color color,
+        out bool isForegroundColor)
+    {
+        closeBracket = -1;
+        color = Color.Empty;
+        isForegroundColor = false;
+
+        if (i < 0 || i + 6 >= s.Length)
+            return false;
+
+        if (s[i] != '!' || s[i + 1] != '[')
+            return false;
+
+        if (IsEscapedAt(s, i))
+            return false;
+
+        if (!StartsWithReservedColorPrefix(s, i + 2, out isForegroundColor))
+            return false;
+
+        closeBracket = FindUnescapedChar(s, ']', i + 2);
+        if (closeBracket < 0)
+            return false;
+
+        string token = s[(i + 2)..closeBracket].Trim();
+        const int prefixLength = 3;
+        if (token.Length <= prefixLength)
+            return false;
+
+        string rawColor = token[prefixLength..].Trim();
+        if (!TryParseColor(rawColor, out color))
+            return false;
+
+        return true;
+    }
+
+    private static bool StartsWithReservedColorPrefix(string s, int start, out bool isForegroundColor)
+    {
+        isForegroundColor = false;
+
+        if (start < 0 || start + 2 >= s.Length)
+            return false;
+
+        ReadOnlySpan<char> remaining = s.AsSpan(start);
+        if (remaining.StartsWith("FG:".AsSpan(), StringComparison.OrdinalIgnoreCase))
+        {
+            isForegroundColor = true;
+            return true;
+        }
+
+        if (remaining.StartsWith("BG:".AsSpan(), StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        return false;
+    }
+
+    private static bool TryParseColor(string value, out Color color)
+    {
+        color = Color.Empty;
+
+        if (string.IsNullOrWhiteSpace(value))
+            return false;
+
+        try
+        {
+            color = ColorTranslator.FromHtml(value.Trim());
+            return !color.IsEmpty;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     private static bool TryReadImageSpan(
         string s,
         int i,
@@ -358,6 +547,9 @@ public static class InlineMarkdown
             return false;
 
         if (IsEscapedAt(s, i))
+            return false;
+
+        if (StartsWithReservedColorPrefix(s, i + 2, out _))
             return false;
 
         int altEnd = FindUnescapedChar(s, ']', i + 2);

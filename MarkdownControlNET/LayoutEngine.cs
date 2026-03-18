@@ -1964,7 +1964,7 @@ public sealed class LayoutEngine
         if (!_footnoteDisplayNumbers.TryGetValue(normalizedLabel, out int number))
             return [run];
 
-        return [InlineRun.FootnoteReference(number.ToString(), run.Href, run.Style)];
+        return [InlineRun.FootnoteReference(number.ToString(), run.Href, run.Style, run.ForegroundColor, run.BackgroundColor)];
     }
 
     private static int ScaleBoundary(int offset, int fromLength, int toLength)
@@ -2305,12 +2305,12 @@ public sealed class LayoutEngine
 
         string text = run.Text.Substring(offset, length);
         if (run.IsFootnoteReference)
-            return InlineRun.FootnoteReference(text, run.Href, run.Style);
+            return InlineRun.FootnoteReference(text, run.Href, run.Style, run.ForegroundColor, run.BackgroundColor);
 
         if (run.IsLink)
-            return InlineRun.Link(text, run.Href, run.Style);
+            return InlineRun.Link(text, run.Href, run.Style, run.ForegroundColor, run.BackgroundColor);
 
-        return new InlineRun(text, run.Style);
+        return new InlineRun(text, run.Style, run.ForegroundColor, run.BackgroundColor);
     }
 
     private void BuildRealizedLinePresentation(
@@ -3134,6 +3134,7 @@ public sealed class LayoutEngine
         return !run.IsImage
             && !run.IsLink
             && !run.IsFootnoteReference
+            && !run.HasCustomColors
             && run.Style == InlineStyle.None
             && string.Equals(run.Text, displayText, StringComparison.Ordinal);
     }

@@ -550,6 +550,9 @@ public static class MarkdownParser
         if (!s.StartsWith("![", StringComparison.Ordinal) || !s.EndsWith(")", StringComparison.Ordinal))
             return false;
 
+        if (StartsWithReservedColorPrefix(s, 2))
+            return false;
+
         int altEnd = FindUnescapedChar(s, ']', 2);
         if (altEnd < 0 || altEnd + 1 >= s.Length || s[altEnd + 1] != '(')
             return false;
@@ -567,6 +570,16 @@ public static class MarkdownParser
         altText = s[2..altEnd];
         source = rawSource;
         return true;
+    }
+
+    private static bool StartsWithReservedColorPrefix(string text, int start)
+    {
+        if (start < 0 || start + 2 >= text.Length)
+            return false;
+
+        ReadOnlySpan<char> remaining = text.AsSpan(start);
+        return remaining.StartsWith("FG:".AsSpan(), StringComparison.OrdinalIgnoreCase)
+            || remaining.StartsWith("BG:".AsSpan(), StringComparison.OrdinalIgnoreCase);
     }
 
     private static int FindUnescapedChar(string text, char ch, int startIndex)
