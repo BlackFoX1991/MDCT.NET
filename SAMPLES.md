@@ -149,9 +149,29 @@ Another nested example:
 
 ![BG:#FFF2A8](Background wrapper with nested foreground: ![FG:#A83232](accent text inside a highlight))
 
+### Frame Wrappers
+
+Inline frame:
+
+![FRAME:#2F5DFF:#EEF3FF](This text is rendered inside a framed inline block.)
+
+Nested frame with color:
+
+![FRAME:#A86A00:#FFF4D6](Frame content can still contain ![FG:#A83232](nested inline formatting).)
+
+### Progress Bars
+
+Inline progress samples:
+
+![PROGRESS:25:Draft 25%:#708090:#B0BEC5]
+
+![PROGRESS:72:Implementation 72%:#5078C8:#7BC96F]
+
+![PROGRESS:100:Done 100%:#2F6B3D:#46B96B]
+
 ### Mixed Inline Content
 
-This sentence mixes **bold**, [a link](https://example.com), `code`, ![FG:#2A7FFF](color), and a footnote reference[^mixed].
+This sentence mixes **bold**, [a link](https://example.com), `code`, ![FG:#2A7FFF](color), ![FRAME:#2F5DFF:#EEF3FF](frame), ![PROGRESS:60:demo:#5078C8:#7BC96F], and a footnote reference[^mixed].
 
 ---
 
@@ -199,6 +219,21 @@ Another fenced block:
 - [x] Supports tables, links, images, and footnotes
 ```
 
+### Multi-Line Frame Block
+
+The control also supports frame blocks that span multiple lines and paragraphs:
+
+![FRAME:#2F5DFF:#EEF3FF](
+This is the first paragraph inside a frame block.
+
+This is the second paragraph. It still supports **bold**, `inline code`, and [links](README.md).
+
+- Lists
+- continue to render normally
+
+The closing line with `)` ends the frame block.
+)
+
 ---
 
 ## Tables
@@ -212,6 +247,8 @@ This table demonstrates header rows, alignment, inline formatting, and color wra
 | Link | Center | [README](README.md) |
 | Foreground color | Center | ![FG:#32A852](Green) |
 | Background color | Center | ![BG:#FFF2A8](Highlight) |
+| Frame | Center | ![FRAME:#2F5DFF:#EEF3FF](Boxed) |
+| Progress | Center | ![PROGRESS:72:72%:#5078C8:#7BC96F] |
 | Strike-through | Center | ~~Old~~ |
 
 Another table for visual grid editing:

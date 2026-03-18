@@ -669,6 +669,9 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         Color TitleColor,
         string Icon);
 
+    private const int FrameBlockOuterLeft = 8;
+    private const int FrameBlockOuterRightMargin = 16;
+
     private AdmonitionPalette GetAdmonitionPalette(AdmonitionKind kind)
     {
         if (!_isDarkThemeEffective)
@@ -1880,19 +1883,30 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
 
     private int MeasureInlineRunWidth(InlineRun run, Font baseFont, Dictionary<int, Font> cache)
     {
-        if (run.IsImage)
-            return GetInlineImageSize(run.Source).Width;
+        int width = GetLeadingFramePadding(run);
+
+        if (run.IsWidget)
+        {
+            using var bmp = new Bitmap(1, 1);
+            bmp.SetResolution(Math.Max(1f, DeviceDpi), Math.Max(1f, DeviceDpi));
+            using var g = Graphics.FromImage(bmp);
+            Font widgetFont = GetOrCreateInlineFont(cache, baseFont, run.Style, isCode: false, run.IsFootnoteReference, _monoFont);
+            width += MeasureInlineWidgetWidth(g, run, widgetFont);
+            width += GetTrailingFramePadding(run);
+            return width;
+        }
 
         if (string.IsNullOrEmpty(run.Text))
-            return 0;
+            return width + GetTrailingFramePadding(run);
 
         bool isCode = (run.Style & InlineStyle.Code) != 0;
         Font runFont = GetOrCreateInlineFont(cache, baseFont, run.Style, isCode, run.IsFootnoteReference, _monoFont);
-        int width = MeasureWidth(run.Text, runFont);
+        width += MeasureWidth(run.Text, runFont);
 
         if (isCode)
             width += InlineCodePadX * 2;
 
+        width += GetTrailingFramePadding(run);
         return width;
     }
 
@@ -3142,6 +3156,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         bool isQuote = line.Kind == MarkdownBlockKind.Quote;
         bool isAdmonition = isQuote && line.IsAdmonition;
         AdmonitionPalette ad = default;
+        bool drawFrameBlock = line.IsFrameBlock && !line.IsFrameMarkerLine;
 
         if (isAdmonition)
         {
@@ -3162,6 +3177,27 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
 
             if (line.IsQuoteEnd)
                 g.DrawLine(borderPen, bgRect.Left, bgRect.Bottom - 1, bgRect.Right, bgRect.Bottom - 1);
+        }
+
+        if (drawFrameBlock)
+        {
+            int bgLeft = FrameBlockOuterLeft;
+            int bgRight = Math.Max(bgLeft + 24, AutoScrollMinSize.Width - FrameBlockOuterRightMargin);
+            int bgWidth = Math.Max(24, bgRight - bgLeft);
+            var bgRect = new Rectangle(bgLeft, line.Bounds.Top, bgWidth, line.Bounds.Height);
+
+            using var frameBrush = new SolidBrush(line.FrameFillColor);
+            using var framePen = new Pen(line.FrameBorderColor, 1f);
+            g.FillRectangle(frameBrush, bgRect);
+
+            if (line.IsFrameContentStart)
+                g.DrawLine(framePen, bgRect.Left, bgRect.Top, bgRect.Right, bgRect.Top);
+
+            if (line.IsFrameContentEnd)
+                g.DrawLine(framePen, bgRect.Left, bgRect.Bottom - 1, bgRect.Right, bgRect.Bottom - 1);
+
+            g.DrawLine(framePen, bgRect.Left, bgRect.Top, bgRect.Left, bgRect.Bottom - 1);
+            g.DrawLine(framePen, bgRect.Right - 1, bgRect.Top, bgRect.Right - 1, bgRect.Bottom - 1);
         }
 
         PendingTableDraftInfo draft = GetPendingTableDraftInfo(line.SourceLine);
@@ -3291,6 +3327,213 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
 
     private Size GetInlineImageSize(string source)
         => InlineImageMetrics.CalculateSize(source, TryGetCachedImageSize);
+
+    private static int GetLeadingFramePadding(InlineRun run)
+        => InlineDecorationMetrics.GetLeadingFramePadding(run.FrameDecorations);
+
+    private static int GetTrailingFramePadding(InlineRun run)
+        => InlineDecorationMetrics.GetTrailingFramePadding(run.FrameDecorations);
+
+    private int MeasureInlineWidgetWidth(Graphics g, InlineRun run, Font runFont)
+    {
+        if (run.IsImage)
+            return GetInlineImageSize(run.Source).Width;
+
+        if (!run.IsProgress)
+            return 0;
+
+        int labelWidth = MeasureWidth(g, run.ProgressLabel, runFont);
+        return InlineDecorationMetrics.GetProgressWidth(labelWidth);
+    }
+
+    private int MeasureInlineRunContentHeight(Graphics g, InlineRun run, Font baseFont, Dictionary<int, Font> cache)
+    {
+        if (run.IsImage)
+            return GetInlineImageSize(run.Source).Height;
+
+        bool isCode = (run.Style & InlineStyle.Code) != 0;
+        Font runFont = GetOrCreateInlineFont(cache, baseFont, run.Style, isCode, run.IsFootnoteReference, _monoFont);
+        int textHeight = MeasureHeight(g, runFont);
+
+        if (run.IsProgress)
+            return InlineDecorationMetrics.GetProgressHeight(textHeight);
+
+        if (isCode)
+            return Math.Max(1, textHeight + InlineCodePadY * 2);
+
+        return textHeight;
+    }
+
+    private Dictionary<int, int> BuildInlineFrameGroupHeights(
+        Graphics g,
+        IReadOnlyList<InlineRun> runs,
+        Font baseFont,
+        Dictionary<int, Font> cache)
+    {
+        var heights = new Dictionary<int, int>();
+
+        foreach (InlineRun run in runs)
+        {
+            if (!run.HasFrameDecorations)
+                continue;
+
+            int contentHeight = MeasureInlineRunContentHeight(g, run, baseFont, cache);
+            for (int i = 0; i < run.FrameDecorations.Length; i++)
+            {
+                InlineFrameDecoration decoration = run.FrameDecorations[i];
+                int height = contentHeight + InlineDecorationMetrics.GetFrameVerticalPaddingFromDepth(run.FrameDecorations.Length, i);
+                heights[decoration.GroupId] = heights.TryGetValue(decoration.GroupId, out int existing)
+                    ? Math.Max(existing, height)
+                    : height;
+            }
+        }
+
+        return heights;
+    }
+
+    private static bool TryGetFrameDecorationIndex(InlineRun run, int groupId, out int decorationIndex)
+    {
+        for (int i = 0; i < run.FrameDecorations.Length; i++)
+        {
+            if (run.FrameDecorations[i].GroupId == groupId)
+            {
+                decorationIndex = i;
+                return true;
+            }
+        }
+
+        decorationIndex = -1;
+        return false;
+    }
+
+    private static Color BlendColors(Color back, Color front, float amount)
+    {
+        amount = Math.Clamp(amount, 0f, 1f);
+        float inverse = 1f - amount;
+        return Color.FromArgb(
+            255,
+            (int)Math.Round(back.R * inverse + front.R * amount),
+            (int)Math.Round(back.G * inverse + front.G * amount),
+            (int)Math.Round(back.B * inverse + front.B * amount));
+    }
+
+    private static GraphicsPath CreateRoundedRectPath(Rectangle rect, int radius)
+    {
+        int diameter = Math.Max(1, radius * 2);
+        int arcWidth = Math.Min(diameter, rect.Width);
+        int arcHeight = Math.Min(diameter, rect.Height);
+
+        var path = new GraphicsPath();
+        if (rect.Width <= 1 || rect.Height <= 1 || radius <= 0)
+        {
+            path.AddRectangle(rect);
+            path.CloseFigure();
+            return path;
+        }
+
+        path.AddArc(rect.X, rect.Y, arcWidth, arcHeight, 180, 90);
+        path.AddArc(rect.Right - arcWidth, rect.Y, arcWidth, arcHeight, 270, 90);
+        path.AddArc(rect.Right - arcWidth, rect.Bottom - arcHeight, arcWidth, arcHeight, 0, 90);
+        path.AddArc(rect.X, rect.Bottom - arcHeight, arcWidth, arcHeight, 90, 90);
+        path.CloseFigure();
+        return path;
+    }
+
+    private void DrawInlineProgress(Graphics g, InlineRun run, Font font, Rectangle bounds, Color fallbackTextColor)
+    {
+        if (bounds.Width <= 0 || bounds.Height <= 0)
+            return;
+
+        Rectangle borderRect = new(
+            bounds.X,
+            bounds.Y,
+            Math.Max(1, bounds.Width - 1),
+            Math.Max(1, bounds.Height - 1));
+
+        Rectangle fillRect = Rectangle.Inflate(borderRect, -1, -1);
+        Color trackColor = run.HasBackgroundColor
+            ? run.BackgroundColor
+            : BlendColors(BackColor, run.ProgressBarColor, 0.18f);
+
+        using (GraphicsPath trackPath = CreateRoundedRectPath(fillRect, InlineDecorationMetrics.ProgressCornerRadius))
+        using (GraphicsPath borderPath = CreateRoundedRectPath(borderRect, InlineDecorationMetrics.ProgressCornerRadius))
+        using (var trackBrush = new SolidBrush(trackColor))
+        using (var barBrush = new SolidBrush(run.ProgressBarColor))
+        using (var borderPen = new Pen(run.ProgressBorderColor, 1f))
+        {
+            g.FillPath(trackBrush, trackPath);
+
+            int clampedPercent = Math.Clamp(run.ProgressPercent, 0, 100);
+            int barWidth = Math.Max(0, (int)Math.Round(fillRect.Width * (clampedPercent / 100f)));
+            if (barWidth > 0)
+            {
+                Rectangle barRect = new(fillRect.X, fillRect.Y, Math.Min(fillRect.Width, barWidth), fillRect.Height);
+                GraphicsState state = g.Save();
+                g.SetClip(barRect);
+                g.FillPath(barBrush, trackPath);
+                g.Restore(state);
+            }
+
+            g.DrawPath(borderPen, borderPath);
+        }
+
+        using var textBrush = new SolidBrush(ResolveRunTextColor(run, fallbackTextColor));
+        using var format = new StringFormat(StringFormat.GenericTypographic)
+        {
+            Alignment = StringAlignment.Center,
+            LineAlignment = StringAlignment.Center,
+            Trimming = StringTrimming.EllipsisCharacter
+        };
+
+        Rectangle textRect = Rectangle.Inflate(bounds, -InlineDecorationMetrics.ProgressPaddingX, 0);
+        g.DrawString(run.ProgressLabel, font, textBrush, textRect, format);
+    }
+
+    private void DrawInlineFrameSegments(
+        Graphics g,
+        IReadOnlyList<InlineRun> runs,
+        int runIndex,
+        float runStartX,
+        float runEndX,
+        Rectangle bounds,
+        IReadOnlyDictionary<int, int> groupHeights)
+    {
+        InlineRun run = runs[runIndex];
+        if (!run.HasFrameDecorations)
+            return;
+
+        for (int decorationIndex = 0; decorationIndex < run.FrameDecorations.Length; decorationIndex++)
+        {
+            InlineFrameDecoration decoration = run.FrameDecorations[decorationIndex];
+            if (!groupHeights.TryGetValue(decoration.GroupId, out int frameHeight))
+                continue;
+
+            float frameStartX = runStartX + InlineDecorationMetrics.GetLeadingFramePaddingBefore(run.FrameDecorations, decorationIndex);
+            float frameEndX = runEndX - InlineDecorationMetrics.GetTrailingFramePaddingBefore(run.FrameDecorations, decorationIndex);
+            int rectX = (int)Math.Round(frameStartX);
+            int rectWidth = Math.Max(1, (int)Math.Round(frameEndX - frameStartX));
+            int rectY = bounds.Top + Math.Max(0, (bounds.Height - frameHeight) / 2);
+            var rect = new Rectangle(rectX, rectY, rectWidth, Math.Max(1, frameHeight));
+
+            using var fillBrush = new SolidBrush(decoration.FillColor);
+            using var borderPen = new Pen(decoration.BorderColor, 1f);
+            g.FillRectangle(fillBrush, rect);
+
+            bool hasPrevious = runIndex > 0 && TryGetFrameDecorationIndex(runs[runIndex - 1], decoration.GroupId, out _);
+            bool hasNext = runIndex + 1 < runs.Count && TryGetFrameDecorationIndex(runs[runIndex + 1], decoration.GroupId, out _);
+
+            int right = rect.Right - 1;
+            int bottom = rect.Bottom - 1;
+            g.DrawLine(borderPen, rect.Left, rect.Top, right, rect.Top);
+            g.DrawLine(borderPen, rect.Left, bottom, right, bottom);
+
+            if (!hasPrevious)
+                g.DrawLine(borderPen, rect.Left, rect.Top, rect.Left, bottom);
+
+            if (!hasNext)
+                g.DrawLine(borderPen, right, rect.Top, right, bottom);
+        }
+    }
 
     private void DrawInlineImage(Graphics g, InlineRun run, Rectangle bounds)
     {
@@ -3712,22 +3955,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         try
         {
             foreach (var run in runs)
-            {
-                if (run.IsImage)
-                {
-                    width += GetInlineImageSize(run.Source).Width;
-                    continue;
-                }
-
-                if (string.IsNullOrEmpty(run.Text)) continue;
-
-                bool isCode = (run.Style & InlineStyle.Code) != 0;
-                Font f = GetOrCreateTableRunFont(cache, baseFont, run.Style, isCode, run.IsFootnoteReference);
-
-                int w = MeasureWidth(g, run.Text, f);
-                if (isCode) w += InlineCodePadX * 2;
-                width += w;
-            }
+                width += MeasureInlineRunWidth(run, baseFont, cache);
         }
         finally
         {
@@ -3778,52 +4006,82 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
 
         try
         {
-            foreach (var run in runs)
+            IReadOnlyDictionary<int, int> frameGroupHeights = BuildInlineFrameGroupHeights(g, runs, baseFont, cache);
+
+            for (int runIndex = 0; runIndex < runs.Count; runIndex++)
             {
+                InlineRun run = runs[runIndex];
+                int runWidth = MeasureInlineRunWidth(run, baseFont, cache);
+                float runX = x;
+                float runEndX = x + runWidth;
+
+                DrawInlineFrameSegments(g, runs, runIndex, runX, runEndX, clipRectContent, frameGroupHeights);
+
+                float contentStartX = runX + GetLeadingFramePadding(run);
+                float contentEndX = runEndX - GetTrailingFramePadding(run);
+
                 if (run.IsImage)
                 {
                     Size imageSize = GetInlineImageSize(run.Source);
                     int imageY = clipRectContent.Top + Math.Max(0, (clipRectContent.Height - imageSize.Height) / 2);
-                    DrawInlineImage(g, run, new Rectangle(x, imageY, imageSize.Width, imageSize.Height));
-                    x += imageSize.Width;
+                    DrawInlineImage(g, run, new Rectangle((int)Math.Round(contentStartX), imageY, imageSize.Width, imageSize.Height));
+                    x += runWidth;
                     continue;
                 }
 
-                if (string.IsNullOrEmpty(run.Text)) continue;
+                if (run.IsProgress)
+                {
+                    Font progressFont = GetOrCreateTableRunFont(cache, baseFont, run.Style, isCode: false, run.IsFootnoteReference);
+                    int progressHeight = InlineDecorationMetrics.GetProgressHeight(MeasureHeight(g, progressFont));
+                    int progressY = clipRectContent.Top + Math.Max(0, (clipRectContent.Height - progressHeight) / 2);
+                    DrawInlineProgress(
+                        g,
+                        run,
+                        progressFont,
+                        new Rectangle((int)Math.Round(contentStartX), progressY, Math.Max(1, (int)Math.Round(contentEndX - contentStartX)), progressHeight),
+                        color);
+                    x += runWidth;
+                    continue;
+                }
+
+                if (string.IsNullOrEmpty(run.Text))
+                {
+                    x += runWidth;
+                    continue;
+                }
 
                 bool isCode = (run.Style & InlineStyle.Code) != 0;
                 Font runFont = GetOrCreateTableRunFont(cache, baseFont, run.Style, isCode, run.IsFootnoteReference);
-                int textW = MeasureWidth(g, run.Text, runFont);
                 int textH = MeasureHeight(g, runFont);
                 Color textColor = ResolveRunTextColor(run, run.IsLink || run.IsFootnoteReference ? _linkColor : color);
 
                 if (run.IsFootnoteReference)
                 {
-                    DrawFootnoteReferenceText(g, run.Text, runFont, new Point(x, start.Y), textColor, run.BackgroundColor);
-                    x += textW;
+                    DrawFootnoteReferenceText(g, run.Text, runFont, new Point((int)Math.Round(contentStartX), start.Y), textColor, run.BackgroundColor);
+                    x += runWidth;
                     continue;
                 }
 
                 if (run.IsLink)
                 {
-                    DrawLinkText(g, run.Text, runFont, new Point(x, start.Y), textColor, run.BackgroundColor);
-                    x += textW;
+                    DrawLinkText(g, run.Text, runFont, new Point((int)Math.Round(contentStartX), start.Y), textColor, run.BackgroundColor);
+                    x += runWidth;
                     continue;
                 }
 
                 if (!isCode)
                 {
-                    FillTextBackground(g, CreateTextBackgroundRectangle(x, x + textW, start.Y, textH), run.BackgroundColor);
-                    DrawTextGdiPlus(g, run.Text, runFont, new Point(x, start.Y), textColor);
-                    x += textW;
+                    FillTextBackground(g, CreateTextBackgroundRectangle(contentStartX, contentEndX, start.Y, textH), run.BackgroundColor);
+                    DrawTextGdiPlus(g, run.Text, runFont, new Point((int)Math.Round(contentStartX), start.Y), textColor);
+                    x += runWidth;
                     continue;
                 }
 
-                int chipW = textW + InlineCodePadX * 2;
+                int chipW = Math.Max(1, (int)Math.Round(contentEndX - contentStartX));
                 int chipH = Math.Min(clipRectContent.Height, textH + InlineCodePadY * 2);
                 int chipY = clipRectContent.Top + Math.Max(0, (clipRectContent.Height - chipH) / 2);
 
-                var chip = new Rectangle(x, chipY, chipW, Math.Max(1, chipH));
+                var chip = new Rectangle((int)Math.Round(contentStartX), chipY, chipW, Math.Max(1, chipH));
 
                 if (run.HasBackgroundColor)
                     FillTextBackground(g, chip, run.BackgroundColor);
@@ -3833,9 +4091,9 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
                 g.DrawRectangle(codePen, chip.X, chip.Y, Math.Max(1, chip.Width - 1), Math.Max(1, chip.Height - 1));
 
                 int textY = chip.Y + Math.Max(0, (chip.Height - textH) / 2);
-                DrawTextGdiPlus(g, run.Text, runFont, new Point(x + InlineCodePadX, textY), textColor);
+                DrawTextGdiPlus(g, run.Text, runFont, new Point((int)Math.Round(contentStartX) + InlineCodePadX, textY), textColor);
 
-                x += chipW;
+                x += runWidth;
             }
         }
         finally
@@ -5767,6 +6025,136 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         }
     }
 
+    private void DrawInlineRunsCore(
+        Graphics g,
+        IReadOnlyList<InlineRun> runs,
+        float[] offsets,
+        int visualStart,
+        float baseX,
+        Rectangle bounds,
+        int contentTextY,
+        Font baseFont,
+        Color defaultTextColor)
+    {
+        int visCol = visualStart;
+        var cache = new Dictionary<int, Font>();
+
+        using var codeBrush = new SolidBrush(_inlineCodeBg);
+        using var codePen = new Pen(_inlineCodeBorder);
+
+        try
+        {
+            IReadOnlyDictionary<int, int> frameGroupHeights = BuildInlineFrameGroupHeights(g, runs, baseFont, cache);
+
+            for (int runIndex = 0; runIndex < runs.Count; runIndex++)
+            {
+                InlineRun run = runs[runIndex];
+                int visualLength = Math.Max(0, run.VisualLength);
+                float runX = SnapVisualX(baseX + OffsetAt(offsets, visCol));
+                int visColEnd = visCol + visualLength;
+                float runEndX = SnapVisualX(baseX + OffsetAt(offsets, visColEnd));
+
+                DrawInlineFrameSegments(g, runs, runIndex, runX, runEndX, bounds, frameGroupHeights);
+
+                float contentStartX = runX + GetLeadingFramePadding(run);
+                float contentEndX = runEndX - GetTrailingFramePadding(run);
+
+                if (run.IsImage)
+                {
+                    Size imageSize = GetInlineImageSize(run.Source);
+                    int imageY = bounds.Top + Math.Max(0, (bounds.Height - imageSize.Height) / 2);
+                    DrawInlineImage(g, run, new Rectangle((int)Math.Round(contentStartX), imageY, imageSize.Width, imageSize.Height));
+                    visCol = visColEnd;
+                    continue;
+                }
+
+                if (run.IsProgress)
+                {
+                    Font progressFont = GetOrCreateInlineFont(cache, baseFont, run.Style, isCode: false, run.IsFootnoteReference, _monoFont);
+                    int progressHeight = InlineDecorationMetrics.GetProgressHeight(MeasureHeight(g, progressFont));
+                    int progressWidth = Math.Max(1, (int)Math.Round(contentEndX - contentStartX));
+                    int progressY = bounds.Top + Math.Max(0, (bounds.Height - progressHeight) / 2);
+                    DrawInlineProgress(
+                        g,
+                        run,
+                        progressFont,
+                        new Rectangle((int)Math.Round(contentStartX), progressY, progressWidth, progressHeight),
+                        defaultTextColor);
+                    visCol = visColEnd;
+                    continue;
+                }
+
+                if (string.IsNullOrEmpty(run.Text))
+                {
+                    visCol = visColEnd;
+                    continue;
+                }
+
+                bool isCode = (run.Style & InlineStyle.Code) != 0;
+                Font runFont = GetOrCreateInlineFont(cache, baseFont, run.Style, isCode, run.IsFootnoteReference, _monoFont);
+                int textHeight = MeasureHeight(g, runFont);
+                Color textColor = ResolveRunTextColor(run, run.IsLink || run.IsFootnoteReference ? _linkColor : defaultTextColor);
+
+                if (run.IsFootnoteReference)
+                {
+                    int runTextY = bounds.Top + Math.Max(0, (bounds.Height - textHeight) / 2) - FootnoteRaiseY;
+                    FillTextBackground(g, CreateTextBackgroundRectangle(contentStartX, contentEndX, runTextY, textHeight), run.BackgroundColor);
+                    DrawTextGdiPlus(g, run.Text, runFont, contentStartX, runTextY, textColor);
+                    visCol = visColEnd;
+                    continue;
+                }
+
+                if (run.IsLink)
+                {
+                    int runTextY = bounds.Top + Math.Max(0, (bounds.Height - textHeight) / 2);
+                    FillTextBackground(g, CreateTextBackgroundRectangle(contentStartX, contentEndX, runTextY, textHeight), run.BackgroundColor);
+                    DrawTextGdiPlus(g, run.Text, runFont, contentStartX, runTextY, textColor);
+
+                    float linkWidth = Math.Max(1f, contentEndX - contentStartX);
+                    float underlineY = runTextY + Math.Max(1, textHeight - 1);
+                    using var linkPen = new Pen(textColor, 1f);
+                    g.DrawLine(linkPen, contentStartX, underlineY, contentStartX + linkWidth, underlineY);
+
+                    visCol = visColEnd;
+                    continue;
+                }
+
+                if (!isCode)
+                {
+                    int runTextY = bounds.Top + Math.Max(0, (bounds.Height - textHeight) / 2);
+                    FillTextBackground(g, CreateTextBackgroundRectangle(contentStartX, contentEndX, runTextY, textHeight), run.BackgroundColor);
+                    DrawTextGdiPlus(g, run.Text, runFont, contentStartX, runTextY, textColor);
+                    visCol = visColEnd;
+                    continue;
+                }
+
+                int chipXi = (int)Math.Round(contentStartX);
+                int chipWi = Math.Max(1, (int)Math.Round(contentEndX - contentStartX));
+                int chipH = Math.Max(1, textHeight + InlineCodePadY * 2);
+                int chipY = contentTextY + Math.Max(0, (bounds.Height - chipH) / 2);
+
+                var chip = new Rectangle(chipXi, chipY, chipWi, chipH);
+
+                if (run.HasBackgroundColor)
+                    FillTextBackground(g, chip, run.BackgroundColor);
+                else
+                    g.FillRectangle(codeBrush, chip);
+
+                g.DrawRectangle(codePen, chip.X, chip.Y, Math.Max(1, chip.Width - 1), Math.Max(1, chip.Height - 1));
+
+                int textY = chip.Y + Math.Max(0, (chip.Height - textHeight) / 2);
+                DrawTextGdiPlus(g, run.Text, runFont, contentStartX + InlineCodePadX, textY, textColor);
+
+                visCol = visColEnd;
+            }
+        }
+        finally
+        {
+            foreach (Font font in cache.Values)
+                font.Dispose();
+        }
+    }
+
     private void DrawInlineRuns(Graphics g, LayoutLine line)
     {
         if (line.Segments.Count == 0)
@@ -5795,98 +6183,16 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         if (TryDrawSimplePlainLine(g, line, contentTextStart, display, baseFont))
             return;
 
-        // Use LayoutEngine's cached offsets so text positions match cursor/selection exactly.
-        float[] offsets = _layout.GetVisualOffsets(line);
-        int visCol = 0;
-        float baseX = contentTextStart.X;
-        var cache = new Dictionary<int, Font>();
-
-        using var codeBrush = new SolidBrush(_inlineCodeBg);
-        using var codePen = new Pen(_inlineCodeBorder);
-
-        try
-        {
-            foreach (var run in line.InlineRuns)
-            {
-                float runX = SnapVisualX(baseX + OffsetAt(offsets, visCol));
-
-                if (run.IsImage)
-                {
-                    Size imageSize = GetInlineImageSize(run.Source);
-                    int imageY = line.Bounds.Top + Math.Max(0, (line.Bounds.Height - imageSize.Height) / 2);
-                    DrawInlineImage(g, run, new Rectangle((int)Math.Round(runX), imageY, imageSize.Width, imageSize.Height));
-                    visCol += Math.Max(1, run.VisualLength);
-                    continue;
-                }
-
-                if (string.IsNullOrEmpty(run.Text)) continue;
-
-                bool isCode = (run.Style & InlineStyle.Code) != 0;
-                Font runFont = GetOrCreateInlineFont(cache, baseFont, run.Style, isCode, run.IsFootnoteReference, _monoFont);
-                int visColEnd = visCol + run.Text.Length;
-                float runEndX = SnapVisualX(baseX + OffsetAt(offsets, visColEnd));
-                int textHeight = MeasureHeight(g, runFont);
-                Color textColor = ResolveRunTextColor(run, run.IsLink || run.IsFootnoteReference ? _linkColor : ForeColor);
-
-                if (run.IsFootnoteReference)
-                {
-                    int runTextY = line.Bounds.Top + Math.Max(0, (line.Bounds.Height - textHeight) / 2) - FootnoteRaiseY;
-                    FillTextBackground(g, CreateTextBackgroundRectangle(runX, runEndX, runTextY, textHeight), run.BackgroundColor);
-                    DrawTextGdiPlus(g, run.Text, runFont, runX, runTextY, textColor);
-                    visCol = visColEnd;
-                    continue;
-                }
-
-                if (run.IsLink)
-                {
-                    int runTextY = line.Bounds.Top + Math.Max(0, (line.Bounds.Height - textHeight) / 2);
-                    FillTextBackground(g, CreateTextBackgroundRectangle(runX, runEndX, runTextY, textHeight), run.BackgroundColor);
-                    DrawTextGdiPlus(g, run.Text, runFont, runX, runTextY, textColor);
-
-                    float linkWidth = Math.Max(1f, runEndX - runX);
-                    float underlineY = runTextY + Math.Max(1, textHeight - 1);
-                    using var linkPen = new Pen(textColor, 1f);
-                    g.DrawLine(linkPen, runX, underlineY, runX + linkWidth, underlineY);
-
-                    visCol = visColEnd;
-                    continue;
-                }
-
-                if (!isCode)
-                {
-                    int runTextY = line.Bounds.Top + Math.Max(0, (line.Bounds.Height - textHeight) / 2);
-                    FillTextBackground(g, CreateTextBackgroundRectangle(runX, runEndX, runTextY, textHeight), run.BackgroundColor);
-                    DrawTextGdiPlus(g, run.Text, runFont, runX, runTextY, textColor);
-                    visCol = visColEnd;
-                    continue;
-                }
-
-                // Code chip: offsets already include left/right padding
-                int chipXi = (int)Math.Round(runX);
-                int chipWi = Math.Max(1, (int)Math.Round(runEndX - runX));
-                int chipH = Math.Max(1, textHeight + InlineCodePadY * 2);
-                int chipY = contentTextStart.Y + Math.Max(0, (line.Bounds.Height - chipH) / 2);
-
-                var chip = new Rectangle(chipXi, chipY, chipWi, chipH);
-
-                if (run.HasBackgroundColor)
-                    FillTextBackground(g, chip, run.BackgroundColor);
-                else
-                    g.FillRectangle(codeBrush, chip);
-
-                g.DrawRectangle(codePen, chip.X, chip.Y, Math.Max(1, chip.Width - 1), Math.Max(1, chip.Height - 1));
-
-                int textY = chip.Y + Math.Max(0, (chip.Height - textHeight) / 2);
-                DrawTextGdiPlus(g, run.Text, runFont, runX + InlineCodePadX, textY, textColor);
-
-                visCol = visColEnd;
-            }
-        }
-        finally
-        {
-            foreach (var f in cache.Values)
-                f.Dispose();
-        }
+        DrawInlineRunsCore(
+            g,
+            line.InlineRuns,
+            _layout.GetVisualOffsets(line),
+            visualStart: 0,
+            baseX: contentTextStart.X,
+            bounds: line.Bounds,
+            contentTextY: contentTextStart.Y,
+            baseFont,
+            ForeColor);
     }
 
     private void DrawInlineRuns(Graphics g, LayoutLine line, LayoutSegment segment)
@@ -5908,97 +6214,16 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         if (TryDrawSimplePlainSegment(g, segment, contentTextStart, baseFont))
             return;
 
-        float[] offsets = segment.VisualOffsets;
-        int visCol = segment.HiddenLeadingVisualCount;
-        float baseX = contentTextStart.X;
-        var cache = new Dictionary<int, Font>();
-
-        using var codeBrush = new SolidBrush(_inlineCodeBg);
-        using var codePen = new Pen(_inlineCodeBorder);
-
-        try
-        {
-            foreach (InlineRun run in segment.InlineRuns)
-            {
-                float runX = SnapVisualX(baseX + OffsetAt(offsets, visCol));
-
-                if (run.IsImage)
-                {
-                    Size imageSize = GetInlineImageSize(run.Source);
-                    int imageY = segment.Bounds.Top + Math.Max(0, (segment.Bounds.Height - imageSize.Height) / 2);
-                    DrawInlineImage(g, run, new Rectangle((int)Math.Round(runX), imageY, imageSize.Width, imageSize.Height));
-                    visCol += Math.Max(1, run.VisualLength);
-                    continue;
-                }
-
-                if (string.IsNullOrEmpty(run.Text))
-                    continue;
-
-                bool isCode = (run.Style & InlineStyle.Code) != 0;
-                Font runFont = GetOrCreateInlineFont(cache, baseFont, run.Style, isCode, run.IsFootnoteReference, _monoFont);
-                int visColEnd = visCol + run.Text.Length;
-                float runEndX = SnapVisualX(baseX + OffsetAt(offsets, visColEnd));
-                int textHeight = MeasureHeight(g, runFont);
-                Color textColor = ResolveRunTextColor(run, run.IsLink || run.IsFootnoteReference ? _linkColor : ForeColor);
-
-                if (run.IsFootnoteReference)
-                {
-                    int runTextY = segment.Bounds.Top + Math.Max(0, (segment.Bounds.Height - textHeight) / 2) - FootnoteRaiseY;
-                    FillTextBackground(g, CreateTextBackgroundRectangle(runX, runEndX, runTextY, textHeight), run.BackgroundColor);
-                    DrawTextGdiPlus(g, run.Text, runFont, runX, runTextY, textColor);
-                    visCol = visColEnd;
-                    continue;
-                }
-
-                if (run.IsLink)
-                {
-                    int runTextY = segment.Bounds.Top + Math.Max(0, (segment.Bounds.Height - textHeight) / 2);
-                    FillTextBackground(g, CreateTextBackgroundRectangle(runX, runEndX, runTextY, textHeight), run.BackgroundColor);
-                    DrawTextGdiPlus(g, run.Text, runFont, runX, runTextY, textColor);
-
-                    float linkWidth = Math.Max(1f, runEndX - runX);
-                    float underlineY = runTextY + Math.Max(1, textHeight - 1);
-                    using var linkPen = new Pen(textColor, 1f);
-                    g.DrawLine(linkPen, runX, underlineY, runX + linkWidth, underlineY);
-
-                    visCol = visColEnd;
-                    continue;
-                }
-
-                if (!isCode)
-                {
-                    int runTextY = segment.Bounds.Top + Math.Max(0, (segment.Bounds.Height - textHeight) / 2);
-                    FillTextBackground(g, CreateTextBackgroundRectangle(runX, runEndX, runTextY, textHeight), run.BackgroundColor);
-                    DrawTextGdiPlus(g, run.Text, runFont, runX, runTextY, textColor);
-                    visCol = visColEnd;
-                    continue;
-                }
-
-                int chipXi = (int)Math.Round(runX);
-                int chipWi = Math.Max(1, (int)Math.Round(runEndX - runX));
-                int chipH = Math.Max(1, textHeight + InlineCodePadY * 2);
-                int chipY = contentTextStart.Y + Math.Max(0, (segment.Bounds.Height - chipH) / 2);
-
-                var chip = new Rectangle(chipXi, chipY, chipWi, chipH);
-
-                if (run.HasBackgroundColor)
-                    FillTextBackground(g, chip, run.BackgroundColor);
-                else
-                    g.FillRectangle(codeBrush, chip);
-
-                g.DrawRectangle(codePen, chip.X, chip.Y, Math.Max(1, chip.Width - 1), Math.Max(1, chip.Height - 1));
-
-                int textY = chip.Y + Math.Max(0, (chip.Height - textHeight) / 2);
-                DrawTextGdiPlus(g, run.Text, runFont, runX + InlineCodePadX, textY, textColor);
-
-                visCol = visColEnd;
-            }
-        }
-        finally
-        {
-            foreach (Font font in cache.Values)
-                font.Dispose();
-        }
+        DrawInlineRunsCore(
+            g,
+            segment.InlineRuns,
+            segment.VisualOffsets,
+            segment.HiddenLeadingVisualCount,
+            contentTextStart.X,
+            segment.Bounds,
+            contentTextStart.Y,
+            baseFont,
+            ForeColor);
     }
 
     private bool TryDrawSimplePlainLine(Graphics g, LayoutLine line, Point contentTextStart, string display, Font baseFont)
@@ -6007,7 +6232,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
             return false;
 
         InlineRun run = line.InlineRuns[0];
-        if (run.IsImage || run.IsLink || run.IsFootnoteReference || run.Style != InlineStyle.None || run.HasCustomColors)
+        if (run.IsWidget || run.IsLink || run.IsFootnoteReference || run.Style != InlineStyle.None || run.HasCustomColors || run.HasFrameDecorations)
             return false;
 
         if (!string.Equals(run.Text, display, StringComparison.Ordinal))
@@ -6035,7 +6260,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
             return false;
 
         InlineRun run = segment.InlineRuns[0];
-        if (run.IsImage || run.IsLink || run.IsFootnoteReference || run.Style != InlineStyle.None || run.HasCustomColors)
+        if (run.IsWidget || run.IsLink || run.IsFootnoteReference || run.Style != InlineStyle.None || run.HasCustomColors || run.HasFrameDecorations)
             return false;
 
         if (!string.Equals(run.Text, segment.DisplayText, StringComparison.Ordinal))
@@ -6231,7 +6456,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         }
 
         InlineRun run = line.InlineRuns[0];
-        if (run.IsImage || run.IsLink || run.IsFootnoteReference || run.Style != InlineStyle.None || run.HasCustomColors)
+        if (run.IsWidget || run.IsLink || run.IsFootnoteReference || run.Style != InlineStyle.None || run.HasCustomColors || run.HasFrameDecorations)
             return false;
 
         if (!string.Equals(run.Text, display, StringComparison.Ordinal))
@@ -6262,7 +6487,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         }
 
         InlineRun run = segment.InlineRuns[0];
-        if (run.IsImage || run.IsLink || run.IsFootnoteReference || run.Style != InlineStyle.None || run.HasCustomColors)
+        if (run.IsWidget || run.IsLink || run.IsFootnoteReference || run.Style != InlineStyle.None || run.HasCustomColors || run.HasFrameDecorations)
             return false;
 
         if (!string.Equals(run.Text, segment.DisplayText, StringComparison.Ordinal))

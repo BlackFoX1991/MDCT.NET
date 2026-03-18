@@ -61,13 +61,31 @@ Key characteristics:
 - Footnote references
 - Inline foreground color wrappers
 - Inline background color wrappers
+- Inline frame wrappers
+- Multi-line frame blocks
+- Inline progress bars
 
-Color syntax examples:
+Inline presentation syntax examples:
 
 ```md
 ![FG:#32A852](Green text)
 ![BG:#5E5A5A](Text with a background)
 ![FG:#32A852](Nested color: ![BG:#5E5A5A](foreground + background))
+![FRAME:#2F5DFF:#EEF3FF](Framed inline text)
+![PROGRESS:72:Build 72%:#5078C8:#7BC96F]
+```
+
+Multi-line frame block example:
+
+```md
+![FRAME:#2F5DFF:#EEF3FF](
+First paragraph inside the frame.
+
+Second paragraph with **inline Markdown** and [links](README.md).
+
+- Lists
+- also remain active
+)
 ```
 
 ### Editing and Interaction Features

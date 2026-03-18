@@ -19,24 +19,38 @@ public enum InlineRunKind
 {
     Text,
     Image,
+    Progress,
     Link,
     FootnoteReference
 }
 
+public readonly record struct InlineFrameDecoration(
+    int GroupId,
+    Color BorderColor,
+    Color FillColor,
+    bool IncludeLeadingPadding,
+    bool IncludeTrailingPadding);
+
 public readonly record struct InlineRun
 {
-    private const string ImagePlaceholderText = "\uFFFC";
+    private const string WidgetPlaceholderText = "\uFFFC";
 
     public InlineRun(string text, InlineStyle style, Color foregroundColor = default, Color backgroundColor = default)
+        : this(
+            InlineRunKind.Text,
+            text,
+            style,
+            string.Empty,
+            string.Empty,
+            string.Empty,
+            foregroundColor,
+            backgroundColor,
+            0,
+            string.Empty,
+            Color.Empty,
+            Color.Empty,
+            Array.Empty<InlineFrameDecoration>())
     {
-        Kind = InlineRunKind.Text;
-        Text = text ?? string.Empty;
-        Style = style;
-        AltText = string.Empty;
-        Source = string.Empty;
-        Href = string.Empty;
-        ForegroundColor = foregroundColor;
-        BackgroundColor = backgroundColor;
     }
 
     private InlineRun(
@@ -47,7 +61,12 @@ public readonly record struct InlineRun
         string source,
         string href,
         Color foregroundColor,
-        Color backgroundColor)
+        Color backgroundColor,
+        int progressPercent,
+        string progressLabel,
+        Color progressBorderColor,
+        Color progressBarColor,
+        InlineFrameDecoration[] frameDecorations)
     {
         Kind = kind;
         Text = text ?? string.Empty;
@@ -57,6 +76,11 @@ public readonly record struct InlineRun
         Href = href ?? string.Empty;
         ForegroundColor = foregroundColor;
         BackgroundColor = backgroundColor;
+        ProgressPercent = progressPercent;
+        ProgressLabel = progressLabel ?? string.Empty;
+        ProgressBorderColor = progressBorderColor;
+        ProgressBarColor = progressBarColor;
+        FrameDecorations = frameDecorations ?? Array.Empty<InlineFrameDecoration>();
     }
 
     public InlineRunKind Kind { get; }
@@ -67,23 +91,102 @@ public readonly record struct InlineRun
     public string Href { get; }
     public Color ForegroundColor { get; }
     public Color BackgroundColor { get; }
+    public int ProgressPercent { get; }
+    public string ProgressLabel { get; }
+    public Color ProgressBorderColor { get; }
+    public Color ProgressBarColor { get; }
+    public InlineFrameDecoration[] FrameDecorations { get; }
 
     public bool IsImage => Kind == InlineRunKind.Image;
+    public bool IsProgress => Kind == InlineRunKind.Progress;
+    public bool IsWidget => IsImage || IsProgress;
     public bool IsLink => Kind == InlineRunKind.Link || Kind == InlineRunKind.FootnoteReference;
     public bool IsFootnoteReference => Kind == InlineRunKind.FootnoteReference;
     public bool HasForegroundColor => !ForegroundColor.IsEmpty;
     public bool HasBackgroundColor => !BackgroundColor.IsEmpty;
     public bool HasCustomColors => HasForegroundColor || HasBackgroundColor;
+    public bool HasFrameDecorations => FrameDecorations.Length != 0;
     public int VisualLength => Text.Length;
 
-    public static InlineRun Image(string altText, string source, InlineStyle style, Color foregroundColor = default, Color backgroundColor = default)
-        => new(InlineRunKind.Image, ImagePlaceholderText, style, altText, source, string.Empty, foregroundColor, backgroundColor);
+    public static InlineRun PlainText(string text, InlineStyle style, Color foregroundColor = default, Color backgroundColor = default, InlineFrameDecoration[]? frameDecorations = null)
+        => new(
+            InlineRunKind.Text,
+            text,
+            style,
+            string.Empty,
+            string.Empty,
+            string.Empty,
+            foregroundColor,
+            backgroundColor,
+            0,
+            string.Empty,
+            Color.Empty,
+            Color.Empty,
+            frameDecorations ?? Array.Empty<InlineFrameDecoration>());
 
-    public static InlineRun Link(string text, string href, InlineStyle style, Color foregroundColor = default, Color backgroundColor = default)
-        => new(InlineRunKind.Link, text, style, string.Empty, string.Empty, href, foregroundColor, backgroundColor);
+    public static InlineRun Image(string altText, string source, InlineStyle style, Color foregroundColor = default, Color backgroundColor = default, InlineFrameDecoration[]? frameDecorations = null)
+        => new(
+            InlineRunKind.Image,
+            WidgetPlaceholderText,
+            style,
+            altText,
+            source,
+            string.Empty,
+            foregroundColor,
+            backgroundColor,
+            0,
+            string.Empty,
+            Color.Empty,
+            Color.Empty,
+            frameDecorations ?? Array.Empty<InlineFrameDecoration>());
 
-    public static InlineRun FootnoteReference(string text, string href, InlineStyle style, Color foregroundColor = default, Color backgroundColor = default)
-        => new(InlineRunKind.FootnoteReference, text, style, string.Empty, string.Empty, href, foregroundColor, backgroundColor);
+    public static InlineRun Progress(int percent, string label, InlineStyle style, Color borderColor, Color barColor, Color foregroundColor = default, Color backgroundColor = default, InlineFrameDecoration[]? frameDecorations = null)
+        => new(
+            InlineRunKind.Progress,
+            WidgetPlaceholderText,
+            style,
+            string.Empty,
+            string.Empty,
+            string.Empty,
+            foregroundColor,
+            backgroundColor,
+            percent,
+            label,
+            borderColor,
+            barColor,
+            frameDecorations ?? Array.Empty<InlineFrameDecoration>());
+
+    public static InlineRun Link(string text, string href, InlineStyle style, Color foregroundColor = default, Color backgroundColor = default, InlineFrameDecoration[]? frameDecorations = null)
+        => new(
+            InlineRunKind.Link,
+            text,
+            style,
+            string.Empty,
+            string.Empty,
+            href,
+            foregroundColor,
+            backgroundColor,
+            0,
+            string.Empty,
+            Color.Empty,
+            Color.Empty,
+            frameDecorations ?? Array.Empty<InlineFrameDecoration>());
+
+    public static InlineRun FootnoteReference(string text, string href, InlineStyle style, Color foregroundColor = default, Color backgroundColor = default, InlineFrameDecoration[]? frameDecorations = null)
+        => new(
+            InlineRunKind.FootnoteReference,
+            text,
+            style,
+            string.Empty,
+            string.Empty,
+            href,
+            foregroundColor,
+            backgroundColor,
+            0,
+            string.Empty,
+            Color.Empty,
+            Color.Empty,
+            frameDecorations ?? Array.Empty<InlineFrameDecoration>());
 }
 
 public sealed record InlineParseResult(
@@ -96,9 +199,32 @@ public sealed record InlineParseResult(
 public static class InlineMarkdown
 {
     public static InlineParseResult Parse(string input)
-        => ParseCore(input);
+        => ParseCore(input, new InlineParseState());
 
-    private static InlineParseResult ParseCore(string input)
+    public static bool TryParseFrameBlockOpenLine(string line, out Color borderColor, out Color fillColor)
+    {
+        borderColor = Color.Empty;
+        fillColor = Color.Empty;
+
+        string trimmed = line?.Trim() ?? string.Empty;
+        if (trimmed.Length == 0 || !trimmed.EndsWith("(", StringComparison.Ordinal) || trimmed.EndsWith(")", StringComparison.Ordinal))
+            return false;
+
+        if (!TryReadFrameDirective(trimmed, 0, out int closeBracket, out borderColor, out fillColor))
+            return false;
+
+        return closeBracket + 2 == trimmed.Length && trimmed[^1] == '(';
+    }
+
+    public static bool IsFrameBlockCloseLine(string line)
+        => string.Equals(line?.Trim(), ")", StringComparison.Ordinal);
+
+    private sealed class InlineParseState
+    {
+        public int NextFrameGroupId { get; set; } = 1;
+    }
+
+    private static InlineParseResult ParseCore(string input, InlineParseState state)
     {
         input ??= string.Empty;
 
@@ -201,10 +327,10 @@ public static class InlineMarkdown
                 for (int s = i; s < colorContentStart; s++)
                     sourceToVisual[s + 1] = outPos;
 
-                InlineParseResult nested = ParseCore(input[colorContentStart..colorContentEnd]);
+                InlineParseResult nested = ParseCore(input[colorContentStart..colorContentEnd], state);
                 foreach (InlineRun nestedRun in nested.Runs)
                 {
-                    runs.Add(ApplyColorPresentation(
+                    runs.Add(ApplyPresentation(
                         nestedRun,
                         style,
                         isForegroundColor ? colorValue : Color.Empty,
@@ -223,6 +349,77 @@ public static class InlineMarkdown
                     sourceToVisual[s + 1] = outPos;
 
                 i = colorEndExclusive;
+                continue;
+            }
+
+            if (TryReadFrameSpan(
+                input,
+                i,
+                out int frameEndExclusive,
+                out int frameContentStart,
+                out int frameContentEnd,
+                out Color frameBorderColor,
+                out Color frameFillColor))
+            {
+                FlushRun();
+
+                for (int s = i; s < frameContentStart; s++)
+                    sourceToVisual[s + 1] = outPos;
+
+                int frameGroupId = state.NextFrameGroupId++;
+                InlineParseResult nested = ParseCore(input[frameContentStart..frameContentEnd], state);
+                for (int nestedIndex = 0; nestedIndex < nested.Runs.Count; nestedIndex++)
+                {
+                    InlineFrameDecoration decoration = new(
+                        frameGroupId,
+                        frameBorderColor,
+                        frameFillColor,
+                        IncludeLeadingPadding: nestedIndex == 0,
+                        IncludeTrailingPadding: nestedIndex == nested.Runs.Count - 1);
+
+                    runs.Add(ApplyPresentation(
+                        nested.Runs[nestedIndex],
+                        style,
+                        Color.Empty,
+                        Color.Empty,
+                        decoration));
+                }
+
+                for (int s = 0; s <= (frameContentEnd - frameContentStart); s++)
+                    sourceToVisual[frameContentStart + s] = outPos + nested.SourceToVisual[s];
+
+                for (int v = 1; v < nested.VisualToSource.Length; v++)
+                    visualToSource.Add(frameContentStart + nested.VisualToSource[v]);
+
+                outPos += nested.Text.Length;
+
+                for (int s = frameContentEnd; s < frameEndExclusive; s++)
+                    sourceToVisual[s + 1] = outPos;
+
+                i = frameEndExclusive;
+                continue;
+            }
+
+            if (TryReadProgressSpan(
+                input,
+                i,
+                out int progressEndExclusive,
+                out int progressPercent,
+                out string progressLabel,
+                out Color progressBorderColor,
+                out Color progressBarColor))
+            {
+                FlushRun();
+
+                for (int s = i + 1; s < progressEndExclusive; s++)
+                    sourceToVisual[s] = outPos;
+
+                runs.Add(InlineRun.Progress(progressPercent, progressLabel, style, progressBorderColor, progressBarColor));
+                outPos++;
+                visualToSource.Add(progressEndExclusive);
+                sourceToVisual[progressEndExclusive] = outPos;
+
+                i = progressEndExclusive;
                 continue;
             }
 
@@ -399,26 +596,54 @@ public static class InlineMarkdown
     private static bool IsEscapable(char c)
         => c is '*' or '_' or '~' or '\\' or '`' or '!' or '[' or ']' or '(' or ')';
 
-    private static InlineRun ApplyColorPresentation(
+    private static InlineRun ApplyPresentation(
         InlineRun run,
         InlineStyle inheritedStyle,
         Color foregroundColor,
-        Color backgroundColor)
+        Color backgroundColor,
+        InlineFrameDecoration? frameDecoration = null)
     {
         InlineStyle style = run.Style | inheritedStyle;
         Color mergedForeground = run.HasForegroundColor ? run.ForegroundColor : foregroundColor;
         Color mergedBackground = run.HasBackgroundColor ? run.BackgroundColor : backgroundColor;
+        InlineFrameDecoration[] mergedFrames = frameDecoration.HasValue
+            ? PrependFrameDecoration(run.FrameDecorations, frameDecoration.Value)
+            : run.FrameDecorations;
 
         if (run.IsFootnoteReference)
-            return InlineRun.FootnoteReference(run.Text, run.Href, style, mergedForeground, mergedBackground);
+            return InlineRun.FootnoteReference(run.Text, run.Href, style, mergedForeground, mergedBackground, mergedFrames);
 
         if (run.IsLink)
-            return InlineRun.Link(run.Text, run.Href, style, mergedForeground, mergedBackground);
+            return InlineRun.Link(run.Text, run.Href, style, mergedForeground, mergedBackground, mergedFrames);
 
         if (run.IsImage)
-            return InlineRun.Image(run.AltText, run.Source, style, mergedForeground, mergedBackground);
+            return InlineRun.Image(run.AltText, run.Source, style, mergedForeground, mergedBackground, mergedFrames);
 
-        return new InlineRun(run.Text, style, mergedForeground, mergedBackground);
+        if (run.IsProgress)
+        {
+            return InlineRun.Progress(
+                run.ProgressPercent,
+                run.ProgressLabel,
+                style,
+                run.ProgressBorderColor,
+                run.ProgressBarColor,
+                mergedForeground,
+                mergedBackground,
+                mergedFrames);
+        }
+
+        return InlineRun.PlainText(run.Text, style, mergedForeground, mergedBackground, mergedFrames);
+    }
+
+    private static InlineFrameDecoration[] PrependFrameDecoration(InlineFrameDecoration[] existing, InlineFrameDecoration decoration)
+    {
+        if (existing.Length == 0)
+            return [decoration];
+
+        var merged = new InlineFrameDecoration[existing.Length + 1];
+        merged[0] = decoration;
+        Array.Copy(existing, 0, merged, 1, existing.Length);
+        return merged;
     }
 
     private static bool TryReadColorSpan(
@@ -449,6 +674,79 @@ public static class InlineMarkdown
 
         contentEnd = closeParen;
         endExclusive = closeParen + 1;
+        return true;
+    }
+
+    private static bool TryReadFrameSpan(
+        string s,
+        int i,
+        out int endExclusive,
+        out int contentStart,
+        out int contentEnd,
+        out Color borderColor,
+        out Color fillColor)
+    {
+        endExclusive = -1;
+        contentStart = -1;
+        contentEnd = -1;
+        borderColor = Color.Empty;
+        fillColor = Color.Empty;
+
+        if (!TryReadFrameDirective(s, i, out int closeBracket, out borderColor, out fillColor))
+            return false;
+
+        if (closeBracket + 1 >= s.Length || s[closeBracket + 1] != '(')
+            return false;
+
+        contentStart = closeBracket + 2;
+        int closeParen = FindImageSourceEnd(s, contentStart);
+        if (closeParen < 0)
+            return false;
+
+        contentEnd = closeParen;
+        endExclusive = closeParen + 1;
+        return true;
+    }
+
+    private static bool TryReadFrameDirective(
+        string s,
+        int i,
+        out int closeBracket,
+        out Color borderColor,
+        out Color fillColor)
+    {
+        closeBracket = -1;
+        borderColor = Color.Empty;
+        fillColor = Color.Empty;
+
+        if (i < 0 || i + 9 >= s.Length)
+            return false;
+
+        if (s[i] != '!' || s[i + 1] != '[')
+            return false;
+
+        if (IsEscapedAt(s, i))
+            return false;
+
+        ReadOnlySpan<char> remaining = s.AsSpan(i + 2);
+        if (!remaining.StartsWith("FRAME:".AsSpan(), StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        closeBracket = FindUnescapedChar(s, ']', i + 2);
+        if (closeBracket < 0)
+            return false;
+
+        string token = s[(i + 2)..closeBracket].Trim();
+        string payload = token[6..].Trim();
+        int separator = payload.IndexOf(':');
+        if (separator <= 0 || separator >= payload.Length - 1)
+            return false;
+
+        string rawBorderColor = payload[..separator].Trim();
+        string rawFillColor = payload[(separator + 1)..].Trim();
+        if (!TryParseColor(rawBorderColor, out borderColor) || !TryParseColor(rawFillColor, out fillColor))
+            return false;
+
         return true;
     }
 
@@ -511,6 +809,86 @@ public static class InlineMarkdown
         return false;
     }
 
+    private static bool TryReadProgressSpan(
+        string s,
+        int i,
+        out int endExclusive,
+        out int percent,
+        out string label,
+        out Color borderColor,
+        out Color barColor)
+    {
+        endExclusive = -1;
+        percent = 0;
+        label = string.Empty;
+        borderColor = Color.Empty;
+        barColor = Color.Empty;
+
+        if (i < 0 || i + 12 >= s.Length)
+            return false;
+
+        if (s[i] != '!' || s[i + 1] != '[')
+            return false;
+
+        if (IsEscapedAt(s, i))
+            return false;
+
+        int closeBracket = FindUnescapedChar(s, ']', i + 2);
+        if (closeBracket < 0)
+            return false;
+
+        if (closeBracket + 1 < s.Length && s[closeBracket + 1] == '(')
+            return false;
+
+        string token = s[(i + 2)..closeBracket].Trim();
+        if (!token.StartsWith("PROGRESS:", StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        string payload = token[9..].Trim();
+        int firstSeparator = payload.IndexOf(':');
+        int lastSeparator = payload.LastIndexOf(':');
+        if (firstSeparator <= 0 || lastSeparator <= firstSeparator)
+            return false;
+
+        int secondLastSeparator = payload.LastIndexOf(':', lastSeparator - 1);
+        if (secondLastSeparator <= firstSeparator)
+            return false;
+
+        string rawPercent = payload[..firstSeparator].Trim();
+        string rawLabel = payload[(firstSeparator + 1)..secondLastSeparator].Trim();
+        string rawBorderColor = payload[(secondLastSeparator + 1)..lastSeparator].Trim();
+        string rawBarColor = payload[(lastSeparator + 1)..].Trim();
+
+        if (!TryParseProgressPercent(rawPercent, out percent) ||
+            string.IsNullOrWhiteSpace(rawLabel) ||
+            !TryParseColor(rawBorderColor, out borderColor) ||
+            !TryParseColor(rawBarColor, out barColor))
+        {
+            return false;
+        }
+
+        label = rawLabel;
+        endExclusive = closeBracket + 1;
+        return true;
+    }
+
+    private static bool TryParseProgressPercent(string value, out int percent)
+    {
+        percent = 0;
+        if (string.IsNullOrWhiteSpace(value))
+            return false;
+
+        string raw = value.Trim();
+        if (raw.EndsWith("%", StringComparison.Ordinal))
+            raw = raw[..^1].Trim();
+
+        if (!int.TryParse(raw, out int parsed))
+            return false;
+
+        percent = Math.Clamp(parsed, 0, 100);
+        return true;
+    }
+
     private static bool TryParseColor(string value, out Color color)
     {
         color = Color.Empty;
@@ -549,7 +927,7 @@ public static class InlineMarkdown
         if (IsEscapedAt(s, i))
             return false;
 
-        if (StartsWithReservedColorPrefix(s, i + 2, out _))
+        if (StartsWithReservedInlineDirectivePrefix(s, i + 2))
             return false;
 
         int altEnd = FindUnescapedChar(s, ']', i + 2);
@@ -572,6 +950,19 @@ public static class InlineMarkdown
         source = rawSource;
         endExclusive = sourceEnd + 1;
         return true;
+    }
+
+    private static bool StartsWithReservedInlineDirectivePrefix(string s, int start)
+    {
+        if (StartsWithReservedColorPrefix(s, start, out _))
+            return true;
+
+        if (start < 0 || start >= s.Length)
+            return false;
+
+        ReadOnlySpan<char> remaining = s.AsSpan(start);
+        return remaining.StartsWith("FRAME:".AsSpan(), StringComparison.OrdinalIgnoreCase)
+            || remaining.StartsWith("PROGRESS:".AsSpan(), StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool TryReadFootnoteReference(

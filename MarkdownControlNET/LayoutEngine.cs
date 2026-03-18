@@ -55,6 +55,15 @@ public sealed class LayoutLine
     public bool IsQuoteStart => Kind == MarkdownBlockKind.Quote && QuoteStartLine >= 0 && SourceLine == QuoteStartLine;
     public bool IsQuoteEnd => Kind == MarkdownBlockKind.Quote && QuoteEndLine >= 0 && SourceLine == QuoteEndLine;
 
+    public bool IsFrameBlock { get; init; }
+    public bool IsFrameMarkerLine { get; init; }
+    public int FrameStartLine { get; init; } = -1;
+    public int FrameEndLine { get; init; } = -1;
+    public Color FrameBorderColor { get; init; } = Color.Empty;
+    public Color FrameFillColor { get; init; } = Color.Empty;
+    public bool IsFrameContentStart => IsFrameBlock && !IsFrameMarkerLine && FrameStartLine >= 0 && SourceLine == FrameStartLine + 1;
+    public bool IsFrameContentEnd => IsFrameBlock && !IsFrameMarkerLine && FrameEndLine >= 0 && SourceLine == FrameEndLine - 1;
+
     public string AdmonitionTitle => QuoteAdmonition switch
     {
         AdmonitionKind.Note => "Note",
@@ -261,10 +270,12 @@ public sealed class LayoutEngine
         char FenceChar);
 
     private readonly record struct FenceMarker(int Col, int Len, char Char);
+    private readonly record struct FrameBlockSpan(int StartLine, int EndLine, Color BorderColor, Color FillColor);
 
     private const int TableCodeChipPadX = 4;
     private const int TableTextMeasureSlack = 2;
     private const int InlineCodeChipPadX = 4;
+    private const int InlineCodeChipPadY = 1;
     private const float FootnoteFontScale = 0.82f;
     private const int ImagePreviewMaxWidth = 720;
     private const int ImagePreviewMaxHeight = 420;
@@ -300,6 +311,85 @@ public sealed class LayoutEngine
         public int cy;
     }
 
+    private static int GetLeadingFramePadding(InlineRun run)
+        => InlineDecorationMetrics.GetLeadingFramePadding(run.FrameDecorations);
+
+    private static int GetTrailingFramePadding(InlineRun run)
+        => InlineDecorationMetrics.GetTrailingFramePadding(run.FrameDecorations);
+
+    private static bool IsUnbreakableInlineRun(InlineRun run)
+        => run.IsWidget || run.HasFrameDecorations || (run.Style & InlineStyle.Code) != 0;
+
+    private float MeasureInlineWidgetWidth(InlineRun run, Font runFont, Graphics graphics)
+    {
+        if (run.IsImage)
+            return InlineImageMetrics.CalculateSize(run.Source, _imageSizeProvider).Width;
+
+        if (!run.IsProgress)
+            return 0f;
+
+        int labelWidth = (int)Math.Ceiling(MeasureAdvanceWidth(graphics, run.ProgressLabel, runFont));
+        return InlineDecorationMetrics.GetProgressWidth(labelWidth);
+    }
+
+    private int MeasureInlineRunContentHeight(InlineRun run, Font baseFont, Graphics graphics, Dictionary<int, Font> cache)
+    {
+        if (run.IsImage)
+            return InlineImageMetrics.CalculateSize(run.Source, _imageSizeProvider).Height;
+
+        bool isCode = (run.Style & InlineStyle.Code) != 0;
+        Font runFont = GetOrCreateRunFont(cache, baseFont, run.Style, isCode, run.IsFootnoteReference);
+        int textHeight = MeasureHeight(graphics, runFont);
+
+        if (run.IsProgress)
+            return InlineDecorationMetrics.GetProgressHeight(textHeight);
+
+        if (isCode)
+            return Math.Max(1, textHeight + InlineCodeChipPadY * 2);
+
+        return textHeight;
+    }
+
+    private float MeasureInlineRunWidth(
+        InlineRun run,
+        Font baseFont,
+        Graphics graphics,
+        Dictionary<int, Font> cache,
+        bool useInkWidthForLastTextRun,
+        int codePadX)
+    {
+        float width = GetLeadingFramePadding(run);
+
+        if (run.IsWidget)
+        {
+            Font widgetFont = GetOrCreateRunFont(cache, baseFont, run.Style, isCode: false, isFootnoteReference: false);
+            width += MeasureInlineWidgetWidth(run, widgetFont, graphics);
+            width += GetTrailingFramePadding(run);
+            return width;
+        }
+
+        if (string.IsNullOrEmpty(run.Text))
+            return width + GetTrailingFramePadding(run);
+
+        bool isCode = (run.Style & InlineStyle.Code) != 0;
+        Font runFont = GetOrCreateRunFont(cache, baseFont, run.Style, isCode, run.IsFootnoteReference);
+        float advanceWidth = MeasureAdvanceWidth(graphics, run.Text, runFont);
+
+        if (isCode)
+        {
+            width += advanceWidth + codePadX * 2;
+            width += GetTrailingFramePadding(run);
+            return width;
+        }
+
+        width += useInkWidthForLastTextRun
+            ? Math.Max(advanceWidth, MeasureInkWidth(graphics, run.Text, runFont))
+            : advanceWidth;
+
+        width += GetTrailingFramePadding(run);
+        return width;
+    }
+
     private int MeasureInlineRunsWidthForTableLayout(IReadOnlyList<InlineRun> runs, Font baseFont, Graphics graphics)
     {
         if (runs.Count == 0) return 0;
@@ -311,48 +401,13 @@ public sealed class LayoutEngine
         {
             for (int i = 0; i < runs.Count; i++)
             {
-                InlineRun run = runs[i];
-
-                if (run.IsImage)
-                {
-                    width += InlineImageMetrics.CalculateSize(run.Source, _imageSizeProvider).Width;
-                    continue;
-                }
-
-                if (string.IsNullOrEmpty(run.Text)) continue;
-
-                bool isCode = (run.Style & InlineStyle.Code) != 0;
-                bool isFootnoteReference = run.IsFootnoteReference;
-                InlineStyle normalized = run.Style & ~InlineStyle.Code;
-
-                int key = ((int)normalized & 0xFF)
-                          | (isCode ? 0x100 : 0)
-                          | (isFootnoteReference ? 0x200 : 0)
-                          | (((int)baseFont.Style & 0xFF) << 9);
-
-                if (!cache.TryGetValue(key, out var f))
-                {
-                    Font seed = isCode ? _monoFont : baseFont;
-                    f = CreateRunDisplayFont(seed, normalized, isFootnoteReference);
-                    cache[key] = f;
-                }
-
-                float advanceWidth = MeasureAdvanceWidth(graphics, run.Text, f);
-                if (isCode)
-                {
-                    width += advanceWidth + TableCodeChipPadX * 2;
-                    continue;
-                }
-
-                if (i == runs.Count - 1)
-                {
-                    float inkWidth = MeasureInkWidth(graphics, run.Text, f);
-                    width += Math.Max(advanceWidth, inkWidth);
-                }
-                else
-                {
-                    width += advanceWidth;
-                }
+                width += MeasureInlineRunWidth(
+                    runs[i],
+                    baseFont,
+                    graphics,
+                    cache,
+                    useInkWidthForLastTextRun: i == runs.Count - 1 && !runs[i].IsWidget,
+                    TableCodeChipPadX);
             }
         }
         finally
@@ -838,6 +893,9 @@ public sealed class LayoutEngine
                     _ => 8
                 };
 
+                if (sem.IsFrameBlock && !sem.IsFrameMarkerLine)
+                    left += 10;
+
                 VisualProjection proj;
                 IReadOnlyList<InlineRun> runs;
                 bool lineRealized = true;
@@ -897,6 +955,11 @@ public sealed class LayoutEngine
                 {
                     // Marker line (e.g. > [!NOTE]) is hidden in rich mode.
                     // Editor can render a visual header instead.
+                    proj = VisualProjection.HidePrefix(source, source.Length);
+                    runs = Array.Empty<InlineRun>();
+                }
+                else if (sem.IsFrameBlock && sem.IsFrameMarkerLine)
+                {
                     proj = VisualProjection.HidePrefix(source, source.Length);
                     runs = Array.Empty<InlineRun>();
                 }
@@ -1120,6 +1183,14 @@ public sealed class LayoutEngine
                     }
                 }
 
+                if (sem.IsFrameBlock && sem.IsFrameMarkerLine && !forceRawThisLine)
+                {
+                    visualOffsets = new[] { 0f };
+                    segments = Array.Empty<LayoutSegment>();
+                    textWidth = 1;
+                    lineHeight = 1;
+                }
+
                 var line = new LayoutLine
                 {
                     SourceLine = lineIdx,
@@ -1148,7 +1219,13 @@ public sealed class LayoutEngine
                     QuoteAdmonition = sem.QuoteAdmonition,
                     IsAdmonitionMarkerLine = sem.IsAdmonitionMarkerLine,
                     QuoteStartLine = sem.QuoteStartLine,
-                    QuoteEndLine = sem.QuoteEndLine
+                    QuoteEndLine = sem.QuoteEndLine,
+                    IsFrameBlock = sem.IsFrameBlock,
+                    IsFrameMarkerLine = sem.IsFrameMarkerLine,
+                    FrameStartLine = sem.FrameStartLine,
+                    FrameEndLine = sem.FrameEndLine,
+                    FrameBorderColor = sem.FrameBorderColor,
+                    FrameFillColor = sem.FrameFillColor
                 };
 
                 _lines.Add(line);
@@ -1964,7 +2041,7 @@ public sealed class LayoutEngine
         if (!_footnoteDisplayNumbers.TryGetValue(normalizedLabel, out int number))
             return [run];
 
-        return [InlineRun.FootnoteReference(number.ToString(), run.Href, run.Style, run.ForegroundColor, run.BackgroundColor)];
+        return [InlineRun.FootnoteReference(number.ToString(), run.Href, run.Style, run.ForegroundColor, run.BackgroundColor, run.FrameDecorations)];
     }
 
     private static int ScaleBoundary(int offset, int fromLength, int toLength)
@@ -2153,7 +2230,7 @@ public sealed class LayoutEngine
             if (runLength <= 0)
                 continue;
 
-            bool unbreakable = run.IsImage || (run.Style & InlineStyle.Code) != 0;
+            bool unbreakable = IsUnbreakableInlineRun(run);
             if (!unbreakable)
             {
                 string text = run.Text;
@@ -2300,17 +2377,40 @@ public sealed class LayoutEngine
 
     private static InlineRun SliceInlineRun(InlineRun run, int offset, int length)
     {
-        if (run.IsImage || length >= run.VisualLength)
+        if (run.IsWidget || length >= run.VisualLength)
             return run;
 
         string text = run.Text.Substring(offset, length);
+        InlineFrameDecoration[] frameDecorations = SliceFrameDecorations(run, offset, length);
         if (run.IsFootnoteReference)
-            return InlineRun.FootnoteReference(text, run.Href, run.Style, run.ForegroundColor, run.BackgroundColor);
+            return InlineRun.FootnoteReference(text, run.Href, run.Style, run.ForegroundColor, run.BackgroundColor, frameDecorations);
 
         if (run.IsLink)
-            return InlineRun.Link(text, run.Href, run.Style, run.ForegroundColor, run.BackgroundColor);
+            return InlineRun.Link(text, run.Href, run.Style, run.ForegroundColor, run.BackgroundColor, frameDecorations);
 
-        return new InlineRun(text, run.Style, run.ForegroundColor, run.BackgroundColor);
+        return InlineRun.PlainText(text, run.Style, run.ForegroundColor, run.BackgroundColor, frameDecorations);
+    }
+
+    private static InlineFrameDecoration[] SliceFrameDecorations(InlineRun run, int offset, int length)
+    {
+        if (!run.HasFrameDecorations)
+            return run.FrameDecorations;
+
+        var sliced = new InlineFrameDecoration[run.FrameDecorations.Length];
+        bool keepLeading = offset == 0;
+        bool keepTrailing = offset + length >= run.VisualLength;
+
+        for (int i = 0; i < run.FrameDecorations.Length; i++)
+        {
+            InlineFrameDecoration decoration = run.FrameDecorations[i];
+            sliced[i] = decoration with
+            {
+                IncludeLeadingPadding = decoration.IncludeLeadingPadding && keepLeading,
+                IncludeTrailingPadding = decoration.IncludeTrailingPadding && keepTrailing
+            };
+        }
+
+        return sliced;
     }
 
     private void BuildRealizedLinePresentation(
@@ -2330,6 +2430,7 @@ public sealed class LayoutEngine
             sem.Kind == MarkdownBlockKind.Quote &&
             sem.QuoteAdmonition != AdmonitionKind.None &&
             sem.IsAdmonitionMarkerLine;
+        bool isFrameMarkerLine = sem.IsFrameBlock && sem.IsFrameMarkerLine;
 
         isImagePreview = false;
         imageAltText = string.Empty;
@@ -2386,6 +2487,13 @@ public sealed class LayoutEngine
         }
 
         if (isAdmonitionMarkerLine)
+        {
+            proj = VisualProjection.HidePrefix(source, source.Length);
+            runs = Array.Empty<InlineRun>();
+            return;
+        }
+
+        if (isFrameMarkerLine)
         {
             proj = VisualProjection.HidePrefix(source, source.Length);
             runs = Array.Empty<InlineRun>();
@@ -2710,13 +2818,21 @@ public sealed class LayoutEngine
     private int MeasureInlineRunsContentHeight(IReadOnlyList<InlineRun> runs, Font baseFont, Graphics graphics)
     {
         int height = MeasureHeight(graphics, baseFont);
+        var cache = new Dictionary<int, Font>();
 
-        foreach (InlineRun run in runs)
+        try
         {
-            if (!run.IsImage)
-                continue;
-
-            height = Math.Max(height, InlineImageMetrics.CalculateSize(run.Source, _imageSizeProvider).Height);
+            foreach (InlineRun run in runs)
+            {
+                int runHeight = MeasureInlineRunContentHeight(run, baseFont, graphics, cache)
+                    + InlineDecorationMetrics.GetTotalFrameVerticalPadding(run.FrameDecorations);
+                height = Math.Max(height, runHeight);
+            }
+        }
+        finally
+        {
+            foreach (Font font in cache.Values)
+                font.Dispose();
         }
 
         return height;
@@ -2804,6 +2920,22 @@ public sealed class LayoutEngine
         out int textWidth,
         out int lineHeight)
     {
+        bool isFrameMarkerLine =
+            sourceLine >= 0 &&
+            sourceLine < _semantics.Length &&
+            _semantics[sourceLine].IsFrameBlock &&
+            _semantics[sourceLine].IsFrameMarkerLine &&
+            !_forceRawLines.Contains(sourceLine);
+
+        if (isFrameMarkerLine)
+        {
+            visualOffsets = new[] { 0f };
+            segments = Array.Empty<LayoutSegment>();
+            textWidth = 1;
+            lineHeight = 1;
+            return;
+        }
+
         visualOffsets = BuildVisualOffsets(displayText, runs, measureFont, measurementGraphics, preferExactPlainTextMeasurement: kind == MarkdownBlockKind.Heading);
         segments = Array.Empty<LayoutSegment>();
 
@@ -2919,6 +3051,7 @@ public sealed class LayoutEngine
         {
             if (line.IsImagePreview ||
                 line.IsTaskListItem ||
+                line.IsFrameBlock ||
                 line.IsAdmonitionMarkerLine ||
                 line.Kind is not (MarkdownBlockKind.Paragraph or MarkdownBlockKind.Blank))
             {
@@ -2971,7 +3104,13 @@ public sealed class LayoutEngine
                 QuoteAdmonition = AdmonitionKind.None,
                 IsAdmonitionMarkerLine = false,
                 QuoteStartLine = -1,
-                QuoteEndLine = -1
+                QuoteEndLine = -1,
+                IsFrameBlock = false,
+                IsFrameMarkerLine = false,
+                FrameStartLine = -1,
+                FrameEndLine = -1,
+                FrameBorderColor = Color.Empty,
+                FrameFillColor = Color.Empty
             };
         }
         finally
@@ -2997,6 +3136,12 @@ public sealed class LayoutEngine
             _semantics[i].IsAdmonitionMarkerLine = false;
             _semantics[i].QuoteStartLine = -1;
             _semantics[i].QuoteEndLine = -1;
+            _semantics[i].IsFrameBlock = false;
+            _semantics[i].IsFrameMarkerLine = false;
+            _semantics[i].FrameStartLine = -1;
+            _semantics[i].FrameEndLine = -1;
+            _semantics[i].FrameBorderColor = Color.Empty;
+            _semantics[i].FrameFillColor = Color.Empty;
         }
     }
 
@@ -3086,10 +3231,13 @@ public sealed class LayoutEngine
         {
             foreach (var run in runs)
             {
-                if (run.IsImage)
+                if (run.IsWidget)
                 {
+                    Font widgetFont = GetOrCreateRunFont(cache, baseFont, run.Style, isCode: false, isFootnoteReference: false);
+                    width += GetLeadingFramePadding(run);
                     col += Math.Max(1, run.VisualLength);
-                    offsets[col] = width + InlineImageMetrics.CalculateSize(run.Source, _imageSizeProvider).Width;
+                    offsets[col] = width + MeasureInlineWidgetWidth(run, widgetFont, graphics);
+                    offsets[col] += GetTrailingFramePadding(run);
                     width = offsets[col];
                     continue;
                 }
@@ -3099,6 +3247,7 @@ public sealed class LayoutEngine
 
                 bool isCode = (run.Style & InlineStyle.Code) != 0;
                 Font runFont = GetOrCreateRunFont(cache, baseFont, run.Style, isCode, run.IsFootnoteReference);
+                width += GetLeadingFramePadding(run);
 
                 if (isCode)
                     width += InlineCodeChipPadX;
@@ -3113,6 +3262,7 @@ public sealed class LayoutEngine
                 if (isCode)
                     offsets[col] += InlineCodeChipPadX;
 
+                offsets[col] += GetTrailingFramePadding(run);
                 width = offsets[col];
             }
         }
@@ -3131,10 +3281,11 @@ public sealed class LayoutEngine
             return false;
 
         InlineRun run = runs[0];
-        return !run.IsImage
+        return !run.IsWidget
             && !run.IsLink
             && !run.IsFootnoteReference
             && !run.HasCustomColors
+            && !run.HasFrameDecorations
             && run.Style == InlineStyle.None
             && string.Equals(run.Text, displayText, StringComparison.Ordinal);
     }
@@ -3172,36 +3323,13 @@ public sealed class LayoutEngine
         {
             for (int i = 0; i < runs.Count; i++)
             {
-                InlineRun run = runs[i];
-
-                if (run.IsImage)
-                {
-                    width += InlineImageMetrics.CalculateSize(run.Source, _imageSizeProvider).Width;
-                    continue;
-                }
-
-                if (string.IsNullOrEmpty(run.Text))
-                    continue;
-
-                bool isCode = (run.Style & InlineStyle.Code) != 0;
-                Font runFont = GetOrCreateRunFont(cache, baseFont, run.Style, isCode, run.IsFootnoteReference);
-
-                float advanceWidth = MeasureAdvanceWidth(graphics, run.Text, runFont);
-                if (isCode)
-                {
-                    width += advanceWidth + InlineCodeChipPadX * 2;
-                    continue;
-                }
-
-                if (i == runs.Count - 1)
-                {
-                    float inkWidth = MeasureInkWidth(graphics, run.Text, runFont);
-                    width += Math.Max(advanceWidth, inkWidth);
-                }
-                else
-                {
-                    width += advanceWidth;
-                }
+                width += MeasureInlineRunWidth(
+                    runs[i],
+                    baseFont,
+                    graphics,
+                    cache,
+                    useInkWidthForLastTextRun: i == runs.Count - 1 && !runs[i].IsWidget,
+                    InlineCodeChipPadX);
             }
         }
         finally
@@ -3460,6 +3588,45 @@ public sealed class LayoutEngine
     private static bool IsHorizontalRuleKind(MarkdownBlockKind kind)
         => kind == MarkdownBlockKind.HorizontalRule;
 
+    private static List<FrameBlockSpan> BuildFrameBlockSpans(DocumentModel doc)
+    {
+        var spans = new List<FrameBlockSpan>();
+        if (doc.LineCount == 0)
+            return spans;
+
+        bool[] fenceLines = new bool[doc.LineCount];
+        foreach (CodeFenceBlock fence in doc.Blocks.OfType<CodeFenceBlock>())
+        {
+            for (int line = Math.Max(0, fence.StartLine); line <= Math.Min(doc.LineCount - 1, fence.EndLine); line++)
+                fenceLines[line] = true;
+        }
+
+        var stack = new Stack<(int StartLine, Color BorderColor, Color FillColor)>();
+
+        for (int line = 0; line < doc.LineCount; line++)
+        {
+            if (fenceLines[line])
+                continue;
+
+            string source = doc.GetLine(line);
+            if (InlineMarkdown.TryParseFrameBlockOpenLine(source, out Color borderColor, out Color fillColor))
+            {
+                stack.Push((line, borderColor, fillColor));
+                continue;
+            }
+
+            if (InlineMarkdown.IsFrameBlockCloseLine(source) && stack.Count > 0)
+            {
+                var open = stack.Pop();
+                if (line > open.StartLine)
+                    spans.Add(new FrameBlockSpan(open.StartLine, line, open.BorderColor, open.FillColor));
+            }
+        }
+
+        spans.Sort((left, right) => left.StartLine.CompareTo(right.StartLine));
+        return spans;
+    }
+
     private static LineSemantic[] BuildSemantics(DocumentModel doc)
     {
         int n = doc.LineCount;
@@ -3478,6 +3645,12 @@ public sealed class LayoutEngine
             sem[i].IsAdmonitionMarkerLine = false;
             sem[i].QuoteStartLine = -1;
             sem[i].QuoteEndLine = -1;
+            sem[i].IsFrameBlock = false;
+            sem[i].IsFrameMarkerLine = false;
+            sem[i].FrameStartLine = -1;
+            sem[i].FrameEndLine = -1;
+            sem[i].FrameBorderColor = Color.Empty;
+            sem[i].FrameFillColor = Color.Empty;
         }
 
         foreach (var b in doc.Blocks)
@@ -3561,6 +3734,22 @@ public sealed class LayoutEngine
             }
         }
 
+        foreach (FrameBlockSpan span in BuildFrameBlockSpans(doc))
+        {
+            int start = Math.Max(0, span.StartLine);
+            int end = Math.Min(n - 1, span.EndLine);
+
+            for (int i = start; i <= end; i++)
+            {
+                sem[i].IsFrameBlock = true;
+                sem[i].IsFrameMarkerLine = i == span.StartLine || i == span.EndLine;
+                sem[i].FrameStartLine = span.StartLine;
+                sem[i].FrameEndLine = span.EndLine;
+                sem[i].FrameBorderColor = span.BorderColor;
+                sem[i].FrameFillColor = span.FillColor;
+            }
+        }
+
         return sem;
     }
 
@@ -3575,5 +3764,11 @@ public sealed class LayoutEngine
         public bool IsAdmonitionMarkerLine;
         public int QuoteStartLine;
         public int QuoteEndLine;
+        public bool IsFrameBlock;
+        public bool IsFrameMarkerLine;
+        public int FrameStartLine;
+        public int FrameEndLine;
+        public Color FrameBorderColor;
+        public Color FrameFillColor;
     }
 }

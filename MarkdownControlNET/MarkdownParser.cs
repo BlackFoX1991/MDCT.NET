@@ -550,7 +550,7 @@ public static class MarkdownParser
         if (!s.StartsWith("![", StringComparison.Ordinal) || !s.EndsWith(")", StringComparison.Ordinal))
             return false;
 
-        if (StartsWithReservedColorPrefix(s, 2))
+        if (StartsWithReservedInlineDirectivePrefix(s, 2))
             return false;
 
         int altEnd = FindUnescapedChar(s, ']', 2);
@@ -572,14 +572,16 @@ public static class MarkdownParser
         return true;
     }
 
-    private static bool StartsWithReservedColorPrefix(string text, int start)
+    private static bool StartsWithReservedInlineDirectivePrefix(string text, int start)
     {
         if (start < 0 || start + 2 >= text.Length)
             return false;
 
         ReadOnlySpan<char> remaining = text.AsSpan(start);
         return remaining.StartsWith("FG:".AsSpan(), StringComparison.OrdinalIgnoreCase)
-            || remaining.StartsWith("BG:".AsSpan(), StringComparison.OrdinalIgnoreCase);
+            || remaining.StartsWith("BG:".AsSpan(), StringComparison.OrdinalIgnoreCase)
+            || remaining.StartsWith("FRAME:".AsSpan(), StringComparison.OrdinalIgnoreCase)
+            || remaining.StartsWith("PROGRESS:".AsSpan(), StringComparison.OrdinalIgnoreCase);
     }
 
     private static int FindUnescapedChar(string text, char ch, int startIndex)
@@ -605,6 +607,8 @@ public static class MarkdownParser
         string line = lines[i];
 
         if (string.IsNullOrWhiteSpace(line)) return true;
+        if (InlineMarkdown.TryParseFrameBlockOpenLine(line, out _, out _)) return true;
+        if (InlineMarkdown.IsFrameBlockCloseLine(line)) return true;
         if (FootnoteDefinitionRegex.IsMatch(line)) return true;
         if (HeadingRegex.IsMatch(line)) return true;
         if (TryParseStandaloneImage(line, out _, out _)) return true;
