@@ -9,7 +9,6 @@ internal sealed class MarkdownPadApplicationState
     public EditorThemeMode ThemeMode { get; set; } = EditorThemeMode.System;
     public string? LastDirectory { get; set; }
     public int SelectedTabIndex { get; set; }
-    public int NextUntitledCounter { get; set; } = 1;
     public List<string> RecentFiles { get; set; } = [];
     public List<MarkdownPadSessionDocument> OpenDocuments { get; set; } = [];
 }
@@ -28,6 +27,7 @@ internal sealed class MarkdownPadSessionDocument
     public string? FilePath { get; set; }
     public string? DefaultName { get; set; }
     public string Markdown { get; set; } = string.Empty;
+    public bool HasContentSnapshot { get; set; } = true;
     public bool Modified { get; set; }
     public float ViewScale { get; set; } = 1f;
 }

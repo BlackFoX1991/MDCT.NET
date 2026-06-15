@@ -2,6 +2,7 @@ using System.Drawing.Printing;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Text.RegularExpressions;
 using MarkdownGdi;
 
 namespace MarkdownPad;
@@ -46,13 +47,14 @@ public partial class frmMain : Form
     private readonly ToolStripMenuItem _editorContextHeading6MenuItem = new() { Name = "editorContextHeading6MenuItem", Text = "H6" };
     private readonly ToolStripMenuItem _editorContextQuoteMenuItem = new() { Name = "editorContextQuoteMenuItem", Text = "Quote" };
     private readonly ToolStripMenuItem _editorContextCodeFenceMenuItem = new() { Name = "editorContextCodeFenceMenuItem", Text = "Code Fence" };
+    private readonly HashSet<padTab> _discardUnsavedChangesOnCloseTabs = [];
+    private readonly HashSet<padTab> _skipSessionRestoreOnCloseTabs = [];
     private ToolStripControlHost? _viewScaleTrackBarHost;
     private ToolStripSeparator? _viewScaleToolStripSeparator;
 
     private EditorThemeMode _themeMode = EditorThemeMode.System;
     private string? _lastDirectory;
     private string _statusMessage = "Ready";
-    private int _untitledCounter = 1;
     private int _printContentTop;
     private int _printRendererWidth;
     private int _printRendererHeight;
@@ -325,7 +327,6 @@ public partial class frmMain : Form
 
         _themeMode = state.ThemeMode;
         _lastDirectory = string.IsNullOrWhiteSpace(state.LastDirectory) ? null : state.LastDirectory;
-        _untitledCounter = Math.Max(1, state.NextUntitledCounter);
 
         _recentFiles.Clear();
         foreach (string file in NormalizeRecentFiles(state.RecentFiles).Take(MaxRecentFiles))
@@ -341,17 +342,7 @@ public partial class frmMain : Form
         }
 
         foreach (MarkdownPadSessionDocument document in state.OpenDocuments)
-        {
-            string? restoredName = string.IsNullOrWhiteSpace(document.FilePath)
-                ? document.DefaultName
-                : Path.GetFileName(document.FilePath);
-
-            padTab tab = CreateNewTab(
-                select: false,
-                defaultName: restoredName,
-                viewScale: NormalizeViewScale(document.ViewScale));
-            tab.RestoreDocument(document.Markdown ?? string.Empty, document.FilePath, document.Modified);
-        }
+            RestoreSessionDocument(document);
 
         if (tabControl1.TabPages.Count == 0)
         {
@@ -368,6 +359,52 @@ public partial class frmMain : Form
 
         UpdateThemeMenuChecks();
         SetStatusMessage("Session restored");
+    }
+
+    private padTab? RestoreSessionDocument(MarkdownPadSessionDocument document)
+    {
+        string? filePath = string.IsNullOrWhiteSpace(document.FilePath)
+            ? null
+            : Path.GetFullPath(document.FilePath);
+
+        string? restoredName = string.IsNullOrWhiteSpace(filePath)
+            ? document.DefaultName
+            : Path.GetFileName(filePath);
+
+        if (filePath is not null && !document.Modified)
+        {
+            if (File.Exists(filePath))
+            {
+                try
+                {
+                    string markdown = ReadMarkdownFileForOpen(filePath, out bool normalizedLineEndings);
+                    padTab fileTab = CreateNewTab(
+                        select: false,
+                        defaultName: restoredName,
+                        viewScale: NormalizeViewScale(document.ViewScale));
+                    fileTab.RestoreDocument(markdown, filePath, normalizedLineEndings);
+                    return fileTab;
+                }
+                catch
+                {
+                    if (!document.HasContentSnapshot)
+                        return null;
+                }
+            }
+            else if (!document.HasContentSnapshot)
+            {
+                return null;
+            }
+        }
+
+        padTab tab = CreateNewTab(
+            select: false,
+            defaultName: restoredName,
+            viewScale: NormalizeViewScale(document.ViewScale));
+
+        bool markModified = document.Modified || (filePath is not null && !File.Exists(filePath));
+        tab.RestoreDocument(document.Markdown ?? string.Empty, filePath, markModified);
+        return tab;
     }
 
     private void ApplyWindowPlacement(WindowPlacementState placement)
@@ -396,9 +433,11 @@ public partial class frmMain : Form
             ThemeMode = _themeMode,
             LastDirectory = _lastDirectory,
             SelectedTabIndex = Math.Max(0, tabControl1.SelectedIndex),
-            NextUntitledCounter = Math.Max(1, _untitledCounter),
             RecentFiles = [.. _recentFiles],
-            OpenDocuments = [.. OpenTabs.Select(CaptureSessionDocument)]
+            OpenDocuments = [.. OpenTabs
+                .Select(CaptureSessionDocument)
+                .Where(document => document is not null)
+                .Cast<MarkdownPadSessionDocument>()]
         };
     }
 
@@ -419,14 +458,22 @@ public partial class frmMain : Form
         };
     }
 
-    private static MarkdownPadSessionDocument CaptureSessionDocument(padTab tab)
+    private MarkdownPadSessionDocument? CaptureSessionDocument(padTab tab)
     {
+        if (_skipSessionRestoreOnCloseTabs.Contains(tab))
+            return null;
+
+        bool discardUnsavedChanges = _discardUnsavedChangesOnCloseTabs.Contains(tab);
+        bool modified = !discardUnsavedChanges && tab.Modified;
+        bool includeContentSnapshot = modified || tab.IsUntitled;
+
         return new MarkdownPadSessionDocument
         {
             FilePath = tab.FilePath,
             DefaultName = tab.IsUntitled ? tab.DocumentName : null,
-            Markdown = tab.Editor.Markdown,
-            Modified = tab.Modified,
+            Markdown = includeContentSnapshot ? tab.Editor.Markdown : string.Empty,
+            HasContentSnapshot = includeContentSnapshot,
+            Modified = modified,
             ViewScale = tab.ViewScale
         };
     }
@@ -544,7 +591,7 @@ public partial class frmMain : Form
     private padTab CreateNewTab(bool select = true, string? defaultName = null, float viewScale = DefaultViewScale)
     {
         string tabName = string.IsNullOrWhiteSpace(defaultName)
-            ? $"Untitled {_untitledCounter++}"
+            ? GetNextUntitledDocumentName()
             : defaultName;
 
         var tab = new padTab(tabName, _themeMode, NormalizeViewScale(viewScale));
@@ -571,6 +618,40 @@ public partial class frmMain : Form
         }
 
         return tab;
+    }
+
+    private string GetNextUntitledDocumentName()
+    {
+        HashSet<int> usedNumbers = [];
+
+        foreach (padTab tab in OpenTabs.Where(tab => tab.IsUntitled))
+        {
+            if (TryParseUntitledDocumentNumber(tab.DocumentName, out int number))
+                usedNumbers.Add(number);
+        }
+
+        int next = 1;
+        while (usedNumbers.Contains(next))
+            next++;
+
+        return next == 1 ? "Untitled" : $"Untitled {next}";
+    }
+
+    private static bool TryParseUntitledDocumentNumber(string name, out int number)
+    {
+        number = 0;
+
+        Match match = Regex.Match(name, @"^Untitled(?: (?<number>[1-9]\d*))?$", RegexOptions.CultureInvariant);
+        if (!match.Success)
+            return false;
+
+        if (!match.Groups["number"].Success)
+        {
+            number = 1;
+            return true;
+        }
+
+        return int.TryParse(match.Groups["number"].Value, out number);
     }
 
     private void OpenDocuments()
@@ -605,7 +686,7 @@ public partial class frmMain : Form
 
             try
             {
-                string markdown = File.ReadAllText(fullPath);
+                string markdown = ReadMarkdownFileForOpen(fullPath, out bool normalizedLineEndings);
                 padTab targetTab;
 
                 if (!reusedBlankTab && reusableTab is not null)
@@ -618,10 +699,12 @@ public partial class frmMain : Form
                     targetTab = CreateNewTab(select: false);
                 }
 
-                targetTab.LoadDocument(markdown, fullPath);
+                targetTab.RestoreDocument(markdown, fullPath, normalizedLineEndings);
                 AddRecentFile(fullPath);
                 selectedTab = targetTab;
-                SetStatusMessage($"Opened: {targetTab.DocumentName}");
+                SetStatusMessage(normalizedLineEndings
+                    ? $"Opened with CRLF normalization pending: {targetTab.DocumentName}"
+                    : $"Opened: {targetTab.DocumentName}");
             }
             catch (Exception ex)
             {
@@ -642,6 +725,23 @@ public partial class frmMain : Form
 
         UpdateUiState();
         return selectedTab;
+    }
+
+    private static string ReadMarkdownFileForOpen(string path, out bool normalizedLineEndings)
+    {
+        string markdown = File.ReadAllText(path);
+        string normalized = NormalizeMarkdownForFile(markdown);
+        normalizedLineEndings = !string.Equals(markdown, normalized, StringComparison.Ordinal);
+        return normalized;
+    }
+
+    private static string NormalizeMarkdownForFile(string markdown)
+    {
+        string lf = (markdown ?? string.Empty)
+            .Replace("\r\n", "\n", StringComparison.Ordinal)
+            .Replace('\r', '\n');
+
+        return lf.Replace("\n", "\r\n", StringComparison.Ordinal);
     }
 
     internal void OpenExternalDocuments(IEnumerable<string> filePaths)
@@ -703,7 +803,7 @@ public partial class frmMain : Form
 
         try
         {
-            File.WriteAllText(targetPath, tab.Editor.Markdown);
+            File.WriteAllText(targetPath, NormalizeMarkdownForFile(tab.Editor.Markdown));
             tab.MarkSaved(targetPath);
             _lastDirectory = Path.GetDirectoryName(targetPath);
             AddRecentFile(targetPath);
@@ -1873,6 +1973,12 @@ public partial class frmMain : Form
 
     private void frmMain_FormClosing(object? sender, FormClosingEventArgs e)
     {
+        if (!ConfirmApplicationClose())
+        {
+            e.Cancel = true;
+            return;
+        }
+
         try
         {
             ApplicationStateStore.Save(CaptureApplicationState());
@@ -1881,6 +1987,52 @@ public partial class frmMain : Form
         {
             // Keep application shutdown non-blocking even if the session file cannot be written.
         }
+    }
+
+    private bool ConfirmApplicationClose()
+    {
+        _discardUnsavedChangesOnCloseTabs.Clear();
+        _skipSessionRestoreOnCloseTabs.Clear();
+
+        foreach (padTab tab in OpenTabs.Where(NeedsSaving).ToList())
+        {
+            tabControl1.SelectedTab = tab;
+            FocusEditor(tab);
+
+            DialogResult result = MessageBox.Show(
+                this,
+                $"Save changes to \"{tab.DocumentName}\"?",
+                AppTitle,
+                MessageBoxButtons.YesNoCancel,
+                MessageBoxIcon.Warning);
+
+            switch (result)
+            {
+                case DialogResult.Yes:
+                    if (!SaveDocument(tab, forceSaveAs: false))
+                    {
+                        _discardUnsavedChangesOnCloseTabs.Clear();
+                        _skipSessionRestoreOnCloseTabs.Clear();
+                        return false;
+                    }
+
+                    break;
+
+                case DialogResult.No:
+                    if (tab.IsUntitled)
+                        _skipSessionRestoreOnCloseTabs.Add(tab);
+                    else
+                        _discardUnsavedChangesOnCloseTabs.Add(tab);
+                    break;
+
+                default:
+                    _discardUnsavedChangesOnCloseTabs.Clear();
+                    _skipSessionRestoreOnCloseTabs.Clear();
+                    return false;
+            }
+        }
+
+        return true;
     }
 
     private void RevealAndActivateWindow()

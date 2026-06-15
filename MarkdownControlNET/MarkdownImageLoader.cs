@@ -5,6 +5,40 @@ namespace MarkdownGdi;
 
 public static class MarkdownImageLoader
 {
+    public const int DefaultMaxImageBytes = 20 * 1024 * 1024;
+
+    public static async Task<byte[]> DownloadBytesAsync(
+        HttpClient httpClient,
+        Uri uri,
+        int maxBytes = DefaultMaxImageBytes,
+        CancellationToken cancellationToken = default)
+    {
+        using HttpResponseMessage response = await httpClient
+            .GetAsync(uri, HttpCompletionOption.ResponseHeadersRead, cancellationToken)
+            .ConfigureAwait(false);
+
+        response.EnsureSuccessStatusCode();
+
+        long? contentLength = response.Content.Headers.ContentLength;
+        if (contentLength > maxBytes)
+            throw new InvalidOperationException($"Image is larger than the {FormatByteLimit(maxBytes)} limit.");
+
+        await using Stream stream = await response.Content
+            .ReadAsStreamAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        return await ReadLimitedAsync(stream, maxBytes, cancellationToken).ConfigureAwait(false);
+    }
+
+    public static byte[] ReadLocalBytes(string path, int maxBytes = DefaultMaxImageBytes)
+    {
+        var fileInfo = new FileInfo(path);
+        if (fileInfo.Length > maxBytes)
+            throw new InvalidOperationException($"Image is larger than the {FormatByteLimit(maxBytes)} limit.");
+
+        return File.ReadAllBytes(path);
+    }
+
     public static Image LoadImage(byte[] bytes, string sourceHint, int svgMaxWidth = 1600, int svgMaxHeight = 1600)
     {
         if (bytes.Length == 0)
@@ -74,5 +108,29 @@ public static class MarkdownImageLoader
         using var encoded = new MemoryStream(data.ToArray(), writable: false);
         using var loaded = Image.FromStream(encoded);
         return new Bitmap(loaded);
+    }
+
+    private static async Task<byte[]> ReadLimitedAsync(Stream stream, int maxBytes, CancellationToken cancellationToken)
+    {
+        using var output = new MemoryStream(capacity: Math.Min(maxBytes, 81920));
+        byte[] buffer = new byte[81920];
+
+        while (true)
+        {
+            int read = await stream.ReadAsync(buffer.AsMemory(0, buffer.Length), cancellationToken).ConfigureAwait(false);
+            if (read == 0)
+                return output.ToArray();
+
+            if (output.Length + read > maxBytes)
+                throw new InvalidOperationException($"Image is larger than the {FormatByteLimit(maxBytes)} limit.");
+
+            output.Write(buffer, 0, read);
+        }
+    }
+
+    private static string FormatByteLimit(int bytes)
+    {
+        double megabytes = bytes / (1024d * 1024d);
+        return $"{megabytes:0.#} MB";
     }
 }

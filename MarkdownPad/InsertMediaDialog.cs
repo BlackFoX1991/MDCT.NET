@@ -215,8 +215,8 @@ internal sealed partial class InsertMediaDialog : Form
         try
         {
             byte[] bytes = analysis.RemoteUri is not null
-                ? await PreviewHttpClient.GetByteArrayAsync(analysis.RemoteUri)
-                : File.ReadAllBytes(analysis.ResolvedTarget);
+                ? await MarkdownImageLoader.DownloadBytesAsync(PreviewHttpClient, analysis.RemoteUri)
+                : MarkdownImageLoader.ReadLocalBytes(analysis.ResolvedTarget);
 
             Image image = MarkdownImageLoader.LoadImage(bytes, analysis.PreviewSourceHint);
 

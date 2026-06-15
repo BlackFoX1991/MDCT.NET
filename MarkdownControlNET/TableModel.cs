@@ -77,7 +77,20 @@ internal sealed class TableModel
     }
 
     private static string EscapeCell(string s)
-        => (s ?? string.Empty).Replace("|", "\\|");
+    {
+        string normalized = (s ?? string.Empty)
+            .Replace("\r\n", "\n")
+            .Replace('\r', '\n');
+
+        string singleLine = string.Join(
+            ' ',
+            normalized
+                .Split('\n')
+                .Select(part => part.Trim())
+                .Where(part => part.Length > 0));
+
+        return singleLine.Replace("|", "\\|");
+    }
 
     private static string AlignmentToDelimiter(TableAlignment a) => a switch
     {

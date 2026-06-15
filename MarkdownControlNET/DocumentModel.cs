@@ -259,8 +259,9 @@ public sealed class DocumentModel
             _lines.RemoveRange(startLine, removeCount);
         }
 
-        if (newLines is not null && newLines.Count > 0)
-            _lines.InsertRange(startLine, newLines);
+        string[] normalizedNewLines = NormalizeReplacementLines(newLines);
+        if (normalizedNewLines.Length > 0)
+            _lines.InsertRange(startLine, normalizedNewLines);
 
         InvalidateCaches();
 
@@ -318,6 +319,21 @@ public sealed class DocumentModel
 
     private static string NormalizeLineEndings(string input)
         => input.Replace("\r\n", "\n").Replace('\r', '\n');
+
+    private static string[] NormalizeReplacementLines(IReadOnlyList<string>? lines)
+    {
+        if (lines is null || lines.Count == 0)
+            return Array.Empty<string>();
+
+        var result = new List<string>(lines.Count);
+        foreach (string line in lines)
+        {
+            string normalized = NormalizeLineEndings(line ?? string.Empty);
+            result.AddRange(normalized.Split('\n'));
+        }
+
+        return result.ToArray();
+    }
 
     private int[] GetLineStartOffsets()
     {

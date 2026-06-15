@@ -21,6 +21,8 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         Timeout = TimeSpan.FromSeconds(15)
     };
 
+    private static readonly SemaphoreSlim ImageLoadGate = new(initialCount: 4);
+
     private bool _isInitializing;
     private bool _pendingInitialRefresh = true;
 
@@ -908,7 +910,8 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
     {
         if (_cellEditor is not null)
         {
-            _cellEditor.Paste();
+            if (TryClipboardGetText(out string clipboardText) && !string.IsNullOrEmpty(clipboardText))
+                _cellEditor.SelectedText = NormalizeTableCellText(clipboardText);
             return;
         }
 
@@ -926,7 +929,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
 
         if (_cellEditor is not null)
         {
-            _cellEditor.SelectedText = normalized;
+            _cellEditor.SelectedText = NormalizeTableCellText(normalized);
             return;
         }
 
@@ -3723,10 +3726,8 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
 
             _imageCache[cacheKey] = created;
 
-            if (remoteUri is not null)
-                _ = Task.Run(() => LoadRemoteImageAsync(cacheKey, remoteUri));
-            else if (!string.IsNullOrWhiteSpace(localPath))
-                _ = Task.Run(() => LoadLocalImage(cacheKey, localPath));
+            if (remoteUri is not null || !string.IsNullOrWhiteSpace(localPath))
+                _ = Task.Run(() => LoadImageAsync(cacheKey, remoteUri, localPath));
             else
                 created.Error = "Image source could not be resolved.";
 
@@ -3776,37 +3777,47 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         return true;
     }
 
-    private async Task LoadRemoteImageAsync(string cacheKey, Uri uri)
+    private async Task LoadImageAsync(string cacheKey, Uri? uri, string? localPath)
     {
-        try
-        {
-            byte[] bytes = await ImageHttpClient.GetByteArrayAsync(uri);
-            Image image = LoadImageFromBytes(bytes, uri.AbsoluteUri);
-            CompleteImageLoad(cacheKey, image, error: null);
-        }
-        catch (Exception ex)
-        {
-            CompleteImageLoad(cacheKey, image: null, error: ex.Message);
-        }
-    }
+        await ImageLoadGate.WaitAsync().ConfigureAwait(false);
 
-    private void LoadLocalImage(string cacheKey, string localPath)
-    {
         try
         {
-            if (!File.Exists(localPath))
+            byte[] bytes;
+            string sourceHint;
+
+            if (uri is not null)
             {
-                CompleteImageLoad(cacheKey, image: null, error: "File not found.");
+                bytes = await MarkdownImageLoader.DownloadBytesAsync(ImageHttpClient, uri).ConfigureAwait(false);
+                sourceHint = uri.AbsoluteUri;
+            }
+            else if (!string.IsNullOrWhiteSpace(localPath))
+            {
+                if (!File.Exists(localPath))
+                {
+                    CompleteImageLoad(cacheKey, image: null, error: "File not found.");
+                    return;
+                }
+
+                bytes = MarkdownImageLoader.ReadLocalBytes(localPath);
+                sourceHint = localPath;
+            }
+            else
+            {
+                CompleteImageLoad(cacheKey, image: null, error: "Image source could not be resolved.");
                 return;
             }
 
-            byte[] bytes = File.ReadAllBytes(localPath);
-            Image image = LoadImageFromBytes(bytes, localPath);
+            Image image = MarkdownImageLoader.LoadImage(bytes, sourceHint, SvgRasterMaxWidth, SvgRasterMaxHeight);
             CompleteImageLoad(cacheKey, image, error: null);
         }
         catch (Exception ex)
         {
             CompleteImageLoad(cacheKey, image: null, error: ex.Message);
+        }
+        finally
+        {
+            ImageLoadGate.Release();
         }
     }
 
@@ -6668,7 +6679,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
             AcceptsReturn = false,
             AcceptsTab = false,
             ScrollBars = ScrollBars.None,
-            Text = text,
+            Text = NormalizeTableCellText(text),
             Bounds = GetCellEditorBounds(cellRectContent),
             Font = GetTableCellEditorFont(row),
             BackColor = GetTableCellEditorBackColor(row),
@@ -6693,9 +6704,33 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         EnterRawTableSourceFromActiveCell();
     }
 
+    private static string NormalizeTableCellText(string? text)
+    {
+        string normalized = (text ?? string.Empty)
+            .Replace("\r\n", "\n", StringComparison.Ordinal)
+            .Replace('\r', '\n');
+
+        return string.Join(
+            ' ',
+            normalized
+                .Split('\n')
+                .Select(part => part.Trim())
+                .Where(part => part.Length > 0));
+    }
+
     private void CellEditor_KeyDown(object? sender, KeyEventArgs e)
     {
         if (_cellEditor is null) return;
+
+        if ((e.Control && e.KeyCode == Keys.V) || (e.Shift && e.KeyCode == Keys.Insert))
+        {
+            if (TryClipboardGetText(out string text) && !string.IsNullOrEmpty(text))
+                _cellEditor.SelectedText = NormalizeTableCellText(text);
+
+            e.Handled = true;
+            e.SuppressKeyPress = true;
+            return;
+        }
 
         if (e.KeyCode == Keys.Escape)
         {
@@ -6763,7 +6798,7 @@ public sealed class MarkdownGdiEditor : ScrollableControl, ISupportInitialize
         if (!discard)
         {
             _activeTable.Model.Normalize();
-            _activeTable.Model.Rows[row][col] = _cellEditor.Text ?? string.Empty;
+            _activeTable.Model.Rows[row][col] = NormalizeTableCellText(_cellEditor.Text);
 
             int targetRow = row;
             int targetCol = col;
